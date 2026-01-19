@@ -17,12 +17,15 @@
 - ~60-70% of TikTok videos have native captions
 
 ### Instagram Reels
-- **Status:** Content Script Implemented, Transcription Still Blocked
-- **Content Script (NEW):** Extracts video URL from page
+- **Status:** In Progress - Content Script + CDN URL Pass-through
+- **Content Script:** Extracts video URL from page
   - File: `apps/chrome-extension/src/entrypoints/instagram.content.ts`
-  - Can get video blob/URL from authenticated page context
+  - Gets video src from `<video>` element or `og:video` meta tag
+- **CDN URL Pass-through:** If content script finds an Instagram CDN URL (https://scontent-*.cdninstagram.com/...),
+  it's passed to the daemon for direct transcription
 - **Limitation:** Instagram has no native captions, requires Whisper transcription
 - **Server-side (blocked):** yt-dlp returns empty response even with cookies
+- **Needs Testing:** Does the CDN URL approach work? Does the generic provider handle video URLs?
 
 ---
 

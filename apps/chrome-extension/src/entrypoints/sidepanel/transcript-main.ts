@@ -258,6 +258,9 @@ async function fetchTranscript() {
         extractOnly: true,
         timestamps: true,
         maxCharacters: null,
+        // When we have a direct video URL (from Instagram content script),
+        // enable transcript mode to force media transcription via yt-dlp/whisper
+        ...(extractedVideoUrl ? { videoMode: 'transcript' } : {}),
       }),
       signal: abortController.signal,
     })

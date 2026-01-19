@@ -73,7 +73,28 @@ export function extractYouTubeVideoId(rawUrl: string): string | null {
 }
 
 export function isDirectMediaUrl(url: string): boolean {
-  return /\.(mp4|mov|m4v|mkv|webm|mp3|m4a|wav|flac|aac)(\?|#|$)/i.test(url)
+  // Check for common video/audio file extensions
+  if (/\.(mp4|mov|m4v|mkv|webm|mp3|m4a|wav|flac|aac)(\?|#|$)/i.test(url)) {
+    return true
+  }
+
+  // Check for known video CDN hostnames (Instagram, TikTok)
+  // These often don't have file extensions in the URL
+  try {
+    const hostname = new URL(url).hostname.toLowerCase()
+    // Instagram CDN: scontent-xxx.cdninstagram.com, instagram.fxxx.fna.fbcdn.net
+    if (hostname.includes('cdninstagram.com') || hostname.includes('fbcdn.net')) {
+      return true
+    }
+    // TikTok CDN: v16-xxx.tiktokcdn.com, v19-xxx.tiktokcdn-us.com
+    if (hostname.includes('tiktokcdn')) {
+      return true
+    }
+  } catch {
+    // ignore parsing errors
+  }
+
+  return false
 }
 
 export function shouldPreferUrlMode(url: string): boolean {
