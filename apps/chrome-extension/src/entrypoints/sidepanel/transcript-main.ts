@@ -142,12 +142,12 @@ async function copyTranscript() {
 
 /**
  * Try to extract transcript directly from page via content script.
- * Returns the transcript text if successful, null if should fall back to daemon.
+ * Returns the transcript text if successful, or video URL for further processing.
  */
 async function tryContentScriptExtraction(
   tabId: number,
   platform: Platform
-): Promise<{ text: string; source: string } | null> {
+): Promise<{ text: string; source: string } | { videoUrl: string; source: string } | null> {
   if (platform === 'tiktok') {
     try {
       const response = await chrome.tabs.sendMessage(tabId, { type: 'tiktok-transcript' }) as TikTokTranscriptResponse
@@ -166,11 +166,14 @@ async function tryContentScriptExtraction(
     try {
       const response = await chrome.tabs.sendMessage(tabId, { type: 'instagram-transcript' }) as InstagramTranscriptResponse
       if (response?.ok && response.videoUrl) {
-        // Instagram returns video URL, not transcript text
-        // We'll pass this to daemon for transcription
-        console.log('[Transcript] Instagram video URL extracted, will transcribe via daemon')
-        // Return null to fall back to daemon, but we could potentially
-        // send the video URL to daemon directly in the future
+        // Instagram returns video URL - check if it's a usable CDN URL
+        const videoUrl = response.videoUrl
+        // CDN URLs from Instagram are typically accessible without auth
+        if (videoUrl.startsWith('https://') && !videoUrl.startsWith('blob:') && !videoUrl.startsWith('data:')) {
+          console.log('[Transcript] Instagram video URL extracted:', videoUrl.slice(0, 100) + '...')
+          return { videoUrl, source: 'instagram-video' }
+        }
+        console.log('[Transcript] Instagram video URL is not a CDN URL, cannot use')
       }
     } catch (err) {
       console.log('[Transcript] Instagram content script error:', err)
@@ -202,6 +205,7 @@ async function fetchTranscript() {
     const tabId = tab?.id
 
     // For TikTok and Instagram, try content script extraction first
+    let extractedVideoUrl: string | null = null
     if ((platform === 'tiktok' || platform === 'instagram') && tabId) {
       const platformLabel = platform === 'tiktok' ? 'TikTok' : 'Instagram'
       showLoading(`Checking ${platformLabel} for captions...`)
@@ -209,16 +213,23 @@ async function fetchTranscript() {
       setProgress(20)
 
       const contentResult = await tryContentScriptExtraction(tabId, platform)
-      if (contentResult) {
+      if (contentResult && 'text' in contentResult) {
+        // Got transcript text directly (TikTok captions)
         setProgress(100)
         setStatus('Done')
         showTranscript(contentResult.text, platform, contentResult.source)
         return
       }
-
-      // Content script didn't get transcript, fall back to daemon
-      setStatus('No captions found, trying server...')
-      setProgress(30)
+      if (contentResult && 'videoUrl' in contentResult) {
+        // Got video URL (Instagram) - will send to daemon for transcription
+        extractedVideoUrl = contentResult.videoUrl
+        setStatus('Video found, transcribing...')
+        setProgress(30)
+      } else {
+        // Content script didn't get transcript, fall back to daemon
+        setStatus('No captions found, trying server...')
+        setProgress(30)
+      }
     }
 
     if (!token) {
@@ -229,6 +240,10 @@ async function fetchTranscript() {
     showLoading(`Fetching ${platform === 'youtube' ? 'YouTube' : platform === 'tiktok' ? 'TikTok' : 'Instagram'} transcript...`)
     setStatus('Connecting to daemon...')
 
+    // Use extracted video URL if available (for Instagram CDN URLs)
+    // This allows the daemon to transcribe the video directly without needing auth
+    const urlToFetch = extractedVideoUrl || currentUrl
+
     // Make request to daemon
     const response = await fetch('http://127.0.0.1:8787/v1/summarize', {
       method: 'POST',
@@ -237,7 +252,7 @@ async function fetchTranscript() {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        url: currentUrl,
+        url: urlToFetch,
         title,
         mode: 'url',
         extractOnly: true,
