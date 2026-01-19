@@ -212,6 +212,11 @@ export const fetchTranscript = async (
       pushHint('YouTube: downloading audio (yt-dlp)')
     }
     attemptedProviders.push('yt-dlp')
+    // Use browser cookies by default for YouTube (helps with bot detection)
+    // Can be disabled by setting YOUTUBE_COOKIES_FROM_BROWSER=none
+    const cookiesEnv = options.env?.YOUTUBE_COOKIES_FROM_BROWSER
+    const cookiesFromBrowser = cookiesEnv === 'none' ? null : (cookiesEnv || 'chrome')
+    const extraArgs = cookiesFromBrowser ? ['--cookies-from-browser', cookiesFromBrowser] : undefined
     const ytdlpResult = await fetchTranscriptWithYtDlp({
       ytDlpPath: options.ytDlpPath,
       env: options.env,
@@ -219,6 +224,7 @@ export const fetchTranscript = async (
       falApiKey: options.falApiKey,
       url,
       onProgress: progress,
+      extraArgs,
     })
     if (ytdlpResult.notes.length > 0) {
       notes.push(...ytdlpResult.notes)

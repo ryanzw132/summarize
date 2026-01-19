@@ -69,8 +69,10 @@ export const fetchTranscript = async (
   pushHint('Instagram: downloading audio for transcription')
   attemptedProviders.push('yt-dlp')
 
-  // Determine if we should try with browser cookies for potentially private reels
-  const cookiesFromBrowser = options.env?.INSTAGRAM_COOKIES_FROM_BROWSER ?? null
+  // Use browser cookies by default for Instagram (most reels require auth)
+  // Can be disabled by setting INSTAGRAM_COOKIES_FROM_BROWSER=none
+  const cookiesEnv = options.env?.INSTAGRAM_COOKIES_FROM_BROWSER
+  const cookiesFromBrowser = cookiesEnv === 'none' ? null : (cookiesEnv || 'chrome')
 
   const ytdlpResult = await fetchInstagramTranscriptWithYtDlp({
     ytDlpPath: options.ytDlpPath,
