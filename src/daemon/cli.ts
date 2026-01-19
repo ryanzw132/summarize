@@ -490,6 +490,13 @@ export async function handleDaemonRequest({
       throw new Error('Daemon not configured')
     }
     const mergedEnv = mergeDaemonEnv({ envForRun, snapshot: cfg.env })
+    // Apply config env vars to process.env so they're available globally
+    // (needed for whisper-cpp detection which checks process.env directly)
+    for (const [key, value] of Object.entries(cfg.env)) {
+      if (typeof value === 'string') {
+        process.env[key] = value
+      }
+    }
     await runDaemonServer({ env: mergedEnv, fetchImpl, config: cfg })
     return true
   }
