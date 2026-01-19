@@ -15,6 +15,7 @@ import { applyTheme } from '../../lib/theme'
 import { generateToken } from '../../lib/token'
 import { mountCheckbox } from '../../ui/zag-checkbox'
 import { ChatController } from './chat-controller'
+import { autoCopyTranscript, createTranscriptView } from './transcript-view'
 import { type ChatHistoryLimits, compactChatHistory } from './chat-state'
 import { createHeaderController } from './header-controller'
 import { createPanelCacheController, type PanelCachePayload } from './panel-cache'
@@ -26,7 +27,7 @@ import type { ChatMessage, PanelPhase, PanelState, RunStart, UiState } from './t
 
 type PanelToBg =
   | { type: 'panel:ready' }
-  | { type: 'panel:summarize'; refresh?: boolean; inputMode?: 'page' | 'video' }
+  | { type: 'panel:summarize'; refresh?: boolean; inputMode?: 'page' | 'video'; transcriptOnly?: boolean }
   | {
       type: 'panel:agent'
       requestId: string
@@ -151,6 +152,8 @@ const drawerToggleBtn = byId<HTMLButtonElement>('drawerToggle')
 const refreshBtn = byId<HTMLButtonElement>('refresh')
 const advancedBtn = byId<HTMLButtonElement>('advanced')
 const autoToggleRoot = byId<HTMLDivElement>('autoToggle')
+const transcriptToggleRoot = byId<HTMLDivElement>('transcriptToggle')
+const transcriptViewRoot = byId<HTMLDivElement>('transcriptViewRoot')
 const lengthRoot = byId<HTMLDivElement>('lengthRoot')
 const pickersRoot = byId<HTMLDivElement>('pickersRoot')
 const sizeSmBtn = byId<HTMLButtonElement>('sizeSm')
@@ -222,6 +225,8 @@ const panelState: PanelState = {
 }
 let drawerAnimation: Animation | null = null
 let autoValue = false
+let transcriptModeValue = defaultSettings.transcriptMode
+let autoCopyTranscriptValue = defaultSettings.autoCopyTranscript
 let chatEnabledValue = defaultSettings.chatEnabled
 let automationEnabledValue = defaultSettings.automationEnabled
 let slidesEnabledValue = defaultSettings.slidesEnabled
@@ -293,6 +298,13 @@ const chatController = new ChatController({
   },
 })
 
+const transcriptViewController = createTranscriptView({
+  containerEl: transcriptViewRoot,
+  onCopy: () => {
+    headerController.setStatus('Transcript copied to clipboard')
+  },
+})
+
 type AutomationNoticeAction = 'extensions' | 'options'
 
 function hideAutomationNotice() {
@@ -315,10 +327,18 @@ function stopSlidesStream() {
   panelState.slidesRunId = null
 }
 
-function setSlidesTranscriptTimedText(value: string | null) {
+function setSlidesTranscriptTimedText(value: string | null, metadata?: Record<string, unknown>) {
   slidesTranscriptTimedText = value ?? null
   slidesTranscriptSegments = parseTranscriptTimedText(slidesTranscriptTimedText)
   slidesTranscriptAvailable = slidesTranscriptSegments.length > 0
+
+  // Update transcript view if in transcript mode
+  if (transcriptModeValue) {
+    const plainText = slidesTranscriptSegments.map((s) => s.text).join(' ')
+    transcriptViewController.setTranscript(plainText || null, metadata ?? null)
+    // Auto-copy if enabled
+    void autoCopyTranscript(plainText, autoCopyTranscriptValue)
+  }
 }
 
 async function fetchSlideTools(): Promise<{
@@ -990,6 +1010,7 @@ function resetSummaryView({
   slidesContextPending = false
   slidesContextUrl = null
   setSlidesTranscriptTimedText(null)
+  transcriptViewController.clear()
   slidesOcrAvailable = false
   slidesTextToggleVisible = false
   slidesTextMode = 'transcript'
@@ -2284,6 +2305,27 @@ const autoToggle = mountCheckbox(autoToggleRoot, {
   },
 })
 
+const transcriptToggle = mountCheckbox(transcriptToggleRoot, {
+  id: 'sidepanel-transcript',
+  label: 'Transcript only',
+  checked: transcriptModeValue,
+  onCheckedChange: (checked) => {
+    transcriptModeValue = checked
+    void patchSettings({ transcriptMode: checked })
+    applyTranscriptMode()
+  },
+})
+
+function applyTranscriptMode() {
+  if (transcriptModeValue) {
+    renderEl.classList.add('hidden')
+    transcriptViewController.show()
+  } else {
+    renderEl.classList.remove('hidden')
+    transcriptViewController.hide()
+  }
+}
+
 function applyChatEnabled() {
   chatContainerEl.toggleAttribute('hidden', !chatEnabledValue)
   chatDockEl.toggleAttribute('hidden', !chatEnabledValue)
@@ -3221,6 +3263,19 @@ function updateControls(state: UiState) {
   automationEnabledValue = state.settings.automationEnabled
   slidesEnabledValue = state.settings.slidesEnabled
   slidesParallelValue = state.settings.slidesParallel
+  transcriptModeValue = state.settings.transcriptMode ?? false
+  autoCopyTranscriptValue = state.settings.autoCopyTranscript ?? false
+  transcriptToggle.update({
+    id: 'sidepanel-transcript',
+    label: 'Transcript only',
+    checked: transcriptModeValue,
+    onCheckedChange: (checked: boolean) => {
+      transcriptModeValue = checked
+      void patchSettings({ transcriptMode: checked })
+      applyTranscriptMode()
+    },
+  })
+  applyTranscriptMode()
   if (state.settings.slidesLayout && state.settings.slidesLayout !== slidesLayoutValue) {
     setSlidesLayout(state.settings.slidesLayout)
   }
@@ -3434,6 +3489,7 @@ function sendSummarize(opts?: { refresh?: boolean }) {
     type: 'panel:summarize',
     refresh: Boolean(opts?.refresh),
     inputMode: inputModeOverride ?? undefined,
+    transcriptOnly: transcriptModeValue || undefined,
   })
 }
 

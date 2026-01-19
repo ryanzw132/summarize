@@ -2458,3 +2458,71 @@ button.setup__pill.isActive {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* Transcript View */
+.transcriptView {
+  padding: 0 6px;
+}
+
+.transcriptView.hidden {
+  display: none;
+}
+
+.transcriptView__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.transcriptView__title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  letter-spacing: 0.1px;
+}
+
+.transcriptView__copyBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  border-radius: 10px;
+}
+
+.transcriptView__copyBtn svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
+.transcriptView__copyBtn.copied {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  color: var(--accent);
+}
+
+.transcriptView__content {
+  font-size: var(--font-size);
+  line-height: var(--line-height, 1.45);
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: color-mix(in srgb, var(--panel) 50%, transparent);
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.transcriptView__content.empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.transcriptView__meta {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}

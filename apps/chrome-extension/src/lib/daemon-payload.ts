@@ -57,6 +57,7 @@ export function buildSummarizeRequestBody({
   inputMode,
   timestamps,
   slides,
+  extractOnly,
 }: {
   extracted: ExtractedPage
   settings: Settings
@@ -69,9 +70,11 @@ export function buildSummarizeRequestBody({
     maxSlides?: number | null
     minDurationSeconds?: number | null
   }
+  extractOnly?: boolean
 }): Record<string, unknown> {
   const baseBody = buildDaemonRequestBody({ extracted, settings, noCache })
   const withTimestamps = timestamps ? { ...baseBody, timestamps: true } : baseBody
+  const withExtractOnly = extractOnly ? { ...withTimestamps, extractOnly: true } : withTimestamps
   const slidesEnabled = Boolean(slides?.enabled)
   const slidesOcr = Boolean(slides?.ocr)
   const slidesSettings = slidesEnabled
@@ -89,14 +92,14 @@ export function buildSummarizeRequestBody({
     : {}
   if (inputMode === 'video') {
     return {
-      ...withTimestamps,
+      ...withExtractOnly,
       mode: 'url',
       videoMode: 'transcript',
       ...slidesSettings,
     }
   }
   if (inputMode === 'page') {
-    return { ...withTimestamps, mode: 'page' }
+    return { ...withExtractOnly, mode: 'page' }
   }
-  return slidesEnabled ? { ...withTimestamps, ...slidesSettings } : withTimestamps
+  return slidesEnabled ? { ...withExtractOnly, ...slidesSettings } : withExtractOnly
 }

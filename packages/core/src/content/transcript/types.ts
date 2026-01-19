@@ -6,7 +6,7 @@ import type {
 } from '../link-preview/deps.js'
 import type { TranscriptResolution, TranscriptSource } from '../link-preview/types.js'
 
-export type TranscriptService = 'youtube' | 'podcast' | 'generic'
+export type TranscriptService = 'youtube' | 'tiktok' | 'instagram' | 'podcast' | 'generic'
 
 export interface ProviderContext {
   url: string

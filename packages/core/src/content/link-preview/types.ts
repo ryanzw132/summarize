@@ -7,6 +7,7 @@ export type TranscriptSource =
   | 'whisper'
   | 'apify'
   | 'html'
+  | 'tiktok-captions'
   | 'unavailable'
   | 'unknown'
 

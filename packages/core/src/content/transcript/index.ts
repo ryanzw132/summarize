@@ -10,9 +10,17 @@ import {
   fetchTranscript as fetchGeneric,
 } from './providers/generic.js'
 import {
+  canHandle as canHandleInstagram,
+  fetchTranscript as fetchInstagram,
+} from './providers/instagram.js'
+import {
   canHandle as canHandlePodcast,
   fetchTranscript as fetchPodcast,
 } from './providers/podcast.js'
+import {
+  canHandle as canHandleTikTok,
+  fetchTranscript as fetchTikTok,
+} from './providers/tiktok.js'
 import {
   canHandle as canHandleYoutube,
   fetchTranscript as fetchYoutube,
@@ -39,6 +47,8 @@ interface ResolveTranscriptOptions {
 
 const PROVIDERS: ProviderModule[] = [
   { id: 'youtube', canHandle: canHandleYoutube, fetchTranscript: fetchYoutube },
+  { id: 'tiktok', canHandle: canHandleTikTok, fetchTranscript: fetchTikTok },
+  { id: 'instagram', canHandle: canHandleInstagram, fetchTranscript: fetchInstagram },
   { id: 'podcast', canHandle: canHandlePodcast, fetchTranscript: fetchPodcast },
   { id: 'generic', canHandle: canHandleGeneric, fetchTranscript: fetchGeneric },
 ]
@@ -91,16 +101,23 @@ export const resolveTranscriptForLink = async (
     }
   }
 
-  const shouldReportProgress = provider.id === 'youtube' || provider.id === 'podcast'
+  const shouldReportProgress =
+    provider.id === 'youtube' ||
+    provider.id === 'tiktok' ||
+    provider.id === 'instagram' ||
+    provider.id === 'podcast'
   if (shouldReportProgress) {
+    const hintMap: Record<string, string> = {
+      youtube: 'YouTube: resolving transcript',
+      tiktok: 'TikTok: resolving transcript',
+      instagram: 'Instagram: resolving transcript',
+      podcast: 'Podcast: resolving transcript',
+    }
     deps.onProgress?.({
       kind: 'transcript-start',
       url: normalizedUrl,
       service: provider.id,
-      hint:
-        provider.id === 'youtube'
-          ? 'YouTube: resolving transcript'
-          : 'Podcast: resolving transcript',
+      hint: hintMap[provider.id] ?? `${provider.id}: resolving transcript`,
     })
   }
 

@@ -20,7 +20,7 @@ export function createTranscriptProgressRenderer({
 } {
   const state: {
     phase: 'idle' | 'download' | 'whisper'
-    service: 'youtube' | 'podcast' | 'generic'
+    service: 'youtube' | 'tiktok' | 'instagram' | 'podcast' | 'generic'
     downloadedBytes: number
     totalBytes: number | null
     startedAtMs: number | null

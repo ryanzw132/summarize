@@ -18,6 +18,8 @@ export type Settings = {
   slidesLayout: SlidesLayout
   summaryTimestamps: boolean
   extendedLogging: boolean
+  transcriptMode: boolean
+  autoCopyTranscript: boolean
   hoverPrompt: string
   transcriber: string
   model: string
@@ -206,6 +208,8 @@ export const defaultSettings: Settings = {
   slidesLayout: 'strip',
   summaryTimestamps: true,
   extendedLogging: false,
+  transcriptMode: false,
+  autoCopyTranscript: false,
   hoverPrompt:
     'Plain text only (no Markdown). Summarize the linked page concisely in 1-2 sentences; aim for 100-200 characters.',
   transcriber: '',
@@ -279,6 +283,14 @@ export async function loadSettings(): Promise<Settings> {
       typeof raw.extendedLogging === 'boolean'
         ? raw.extendedLogging
         : defaultSettings.extendedLogging,
+    transcriptMode:
+      typeof raw.transcriptMode === 'boolean'
+        ? raw.transcriptMode
+        : defaultSettings.transcriptMode,
+    autoCopyTranscript:
+      typeof raw.autoCopyTranscript === 'boolean'
+        ? raw.autoCopyTranscript
+        : defaultSettings.autoCopyTranscript,
     hoverPrompt: normalizeHoverPrompt(raw.hoverPrompt),
     transcriber: normalizeTranscriber(raw.transcriber),
     maxChars: typeof raw.maxChars === 'number' ? raw.maxChars : defaultSettings.maxChars,

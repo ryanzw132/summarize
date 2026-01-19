@@ -53,28 +53,28 @@ export type LinkPreviewProgressEvent =
   | {
       kind: 'transcript-media-download-start'
       url: string
-      service: 'youtube' | 'podcast' | 'generic'
+      service: 'youtube' | 'tiktok' | 'instagram' | 'podcast' | 'generic'
       mediaUrl: string | null
       totalBytes: number | null
     }
   | {
       kind: 'transcript-media-download-progress'
       url: string
-      service: 'youtube' | 'podcast' | 'generic'
+      service: 'youtube' | 'tiktok' | 'instagram' | 'podcast' | 'generic'
       downloadedBytes: number
       totalBytes: number | null
     }
   | {
       kind: 'transcript-media-download-done'
       url: string
-      service: 'youtube' | 'podcast' | 'generic'
+      service: 'youtube' | 'tiktok' | 'instagram' | 'podcast' | 'generic'
       downloadedBytes: number
       totalBytes: number | null
     }
   | {
       kind: 'transcript-whisper-start'
       url: string
-      service: 'youtube' | 'podcast' | 'generic'
+      service: 'youtube' | 'tiktok' | 'instagram' | 'podcast' | 'generic'
       providerHint: TranscriptionProviderHint
       modelId: string | null
       totalDurationSeconds: number | null
@@ -83,7 +83,7 @@ export type LinkPreviewProgressEvent =
   | {
       kind: 'transcript-whisper-progress'
       url: string
-      service: 'youtube' | 'podcast' | 'generic'
+      service: 'youtube' | 'tiktok' | 'instagram' | 'podcast' | 'generic'
       processedDurationSeconds: number | null
       totalDurationSeconds: number | null
       partIndex: number | null
@@ -92,14 +92,14 @@ export type LinkPreviewProgressEvent =
   | {
       kind: 'transcript-start'
       url: string
-      service: 'youtube' | 'podcast' | 'generic'
+      service: 'youtube' | 'tiktok' | 'instagram' | 'podcast' | 'generic'
       hint: string | null
     }
   | {
       kind: 'transcript-done'
       url: string
       ok: boolean
-      service: 'youtube' | 'podcast' | 'generic'
+      service: 'youtube' | 'tiktok' | 'instagram' | 'podcast' | 'generic'
       source: TranscriptSource | null
       hint: string | null
     }

@@ -18,7 +18,7 @@ import { parseSseStream } from '../lib/sse'
 
 type PanelToBg =
   | { type: 'panel:ready' }
-  | { type: 'panel:summarize'; refresh?: boolean; inputMode?: 'page' | 'video' }
+  | { type: 'panel:summarize'; refresh?: boolean; inputMode?: 'page' | 'video'; transcriptOnly?: boolean }
   | {
       type: 'panel:agent'
       requestId: string
@@ -1031,7 +1031,7 @@ export default defineBackground(() => {
   const summarizeActiveTab = async (
     session: PanelSession,
     reason: string,
-    opts?: { refresh?: boolean; inputMode?: 'page' | 'video' }
+    opts?: { refresh?: boolean; inputMode?: 'page' | 'video'; transcriptOnly?: boolean }
   ) => {
     if (!isPanelOpen(session)) return
 
@@ -1326,6 +1326,7 @@ export default defineBackground(() => {
         inputMode: effectiveInputMode,
         timestamps: wantsSummaryTimestamps,
         slides: summarySlides,
+        extractOnly: opts?.transcriptOnly,
       })
       logPanel('summarize:request', {
         url: resolvedPayload.url,
@@ -1610,6 +1611,7 @@ export default defineBackground(() => {
           {
             refresh: Boolean((raw as { refresh?: boolean }).refresh),
             inputMode: (raw as { inputMode?: 'page' | 'video' }).inputMode,
+            transcriptOnly: (raw as { transcriptOnly?: boolean }).transcriptOnly,
           }
         )
         break

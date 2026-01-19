@@ -3,164 +3,60 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Summarize</title>
-    <link rel="stylesheet" href="./style.css" />
+    <title>Transcript</title>
+    <link rel="stylesheet" href="./transcript.css" />
   </head>
   <body>
     <header>
-      <div class="brand">
-        <div id="title" class="title">Summarize</div>
-        <div id="subtitle" class="subtitle"></div>
+      <div class="header-content">
+        <h1 id="title">Transcript</h1>
+        <span id="status" class="status"></span>
       </div>
-      <div class="controls">
-        <div id="summarizeControlRoot" class="summarizeControlRoot"></div>
-        <button id="drawerToggle" type="button" class="ghost icon" aria-label="Settings">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.18 7.18 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 1h-3.8a.5.5 0 0 0-.49.42l-.36 2.54c-.58.23-1.12.54-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.71 7.48a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.83 14.52a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.3.6.22l2.39-.96c.51.4 1.05.71 1.63.94l.36 2.54c.04.24.25.42.49.42h3.8c.24 0 .45-.18.49-.42l.36-2.54c.58-.23 1.12-.54 1.63-.94l2.39.96c.22.09.47 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5Z"
-            />
-          </svg>
-        </button>
+      <div id="progress" class="progress hidden">
+        <div id="progressFill" class="progress-fill"></div>
       </div>
-      <div id="progress" class="progress" aria-hidden="true">
-        <div id="progressFill" class="progressFill"></div>
-      </div>
-      <div id="slideNotice" class="slideNotice hidden" role="status" aria-live="polite"></div>
     </header>
 
-    <section id="drawer" class="drawer hidden" aria-label="Controls">
-      <div class="drawerGrid">
-        <div id="pickersRoot"></div>
-        <div id="lengthRoot"></div>
-        <div class="size">
-          <span>Size</span>
-          <div class="sizeControl" role="group" aria-label="Text size">
-            <button id="sizeSm" type="button" class="ghost sizeBtn" aria-label="Smaller text">
-              A
-            </button>
-            <span class="sizeDivider" aria-hidden="true"></span>
-            <button id="sizeLg" type="button" class="ghost sizeBtn sizeBtnLg" aria-label="Larger text">
-              A
-            </button>
-          </div>
-        </div>
-        <div class="lineHeight">
-          <span>Line</span>
-          <div class="lineHeightControl" role="group" aria-label="Line height">
-            <button id="lineTight" type="button" class="ghost lineHeightBtn" aria-label="Tighter line height">
-              <svg class="lineIcon lineIconTight" viewBox="0 0 16 12" aria-hidden="true">
-                <path d="M2 2H14M2 5H14M2 8H14" />
-              </svg>
-            </button>
-            <span class="sizeDivider" aria-hidden="true"></span>
-            <button id="lineLoose" type="button" class="ghost lineHeightBtn" aria-label="Looser line height">
-              <svg class="lineIcon lineIconLoose" viewBox="0 0 16 12" aria-hidden="true">
-                <path d="M2 1H14M2 6H14M2 11H14" />
-              </svg>
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <details id="advancedSettings" class="drawerAdvanced">
-        <summary>Advanced</summary>
-        <div class="drawerAdvancedBody">
-          <label class="wide">
-            <span>Model</span>
-            <div id="modelRow" class="combo modelRow">
-              <select id="modelPreset">
-                <option value="auto">Auto</option>
-                <option value="free">Free</option>
-                <option value="custom">Custom…</option>
-              </select>
-              <input
-                id="modelCustom"
-                type="text"
-                placeholder="custom model id"
-                autocapitalize="off"
-                autocomplete="off"
-                spellcheck="false"
-                hidden
-              />
-              <button id="modelRefresh" type="button" class="ghost small" title="Refresh free models">
-                Scan free
-              </button>
-            </div>
-            <div id="modelStatus" class="modelStatus" role="status" aria-live="polite"></div>
-          </label>
-          <label class="wide">
-            <span>Slides view</span>
-            <select id="slidesLayout">
-              <option value="strip">Summary + strip</option>
-              <option value="gallery">Slides only</option>
-            </select>
-          </label>
-          <div class="drawerAdvancedRow">
-            <div id="autoToggle" class="toggleRow"></div>
-            <div class="drawerActions drawerAdvancedActions">
-              <button id="refresh" type="button" class="ghost" title="Refresh (Shift+Enter)">
-                Refresh
-              </button>
-              <button id="advanced" type="button" class="ghost">Advanced…</button>
-            </div>
-          </div>
-        </div>
-      </details>
-    </section>
-
     <main>
-      <div id="setup" class="setup hidden"></div>
-      <div id="error" class="error hidden" role="status" aria-live="polite">
-        <div class="error__title">Something went wrong</div>
-        <p id="errorMessage" class="error__message"></p>
-        <div class="error__actions">
-          <button id="errorRetry" type="button" class="ghost">Try again</button>
-        </div>
-      </div>
-      <article id="render" class="render"></article>
-      <pre id="raw" class="raw hidden"></pre>
-
-      <div id="metricsHome">
-        <div id="metrics" class="metrics hidden"></div>
+      <div id="setup" class="setup hidden">
+        <p>Setup required. Please configure your daemon token in the extension options.</p>
+        <button id="openOptions" type="button" class="btn">Open Options</button>
       </div>
 
-      <section id="chatContainer" class="chatContainer">
-        <div id="chatMessages" class="chatMessages isHidden"></div>
-        <div id="chatContextStatus" class="chatContextStatus isHidden"></div>
-        <div id="automationNotice" class="automationNotice hidden" role="status" aria-live="polite">
-          <div id="automationNoticeTitle" class="automationNotice__title"></div>
-          <div id="automationNoticeMessage" class="automationNotice__message"></div>
-          <div class="automationNotice__actions">
-            <button id="automationNoticeAction" type="button" class="ghost small">
-              Open extension details
-            </button>
-          </div>
+      <div id="error" class="error hidden">
+        <p id="errorMessage"></p>
+        <button id="retryBtn" type="button" class="btn">Try Again</button>
+      </div>
+
+      <div id="unsupported" class="unsupported hidden">
+        <p>Navigate to a YouTube, TikTok, or Instagram Reel to extract transcript.</p>
+        <p class="supported-urls">
+          Supported URLs:<br>
+          - youtube.com/watch?v=...<br>
+          - youtube.com/shorts/...<br>
+          - tiktok.com/@user/video/...<br>
+          - instagram.com/reel/...
+        </p>
+      </div>
+
+      <div id="transcriptContainer" class="transcript-container hidden">
+        <div class="transcript-header">
+          <span id="sourceInfo" class="source-info"></span>
+          <button id="copyBtn" type="button" class="btn btn-copy">Copy</button>
         </div>
-        <div id="chatMetricsSlot" class="chatMetricsSlot"></div>
-      </section>
+        <div id="transcript" class="transcript"></div>
+      </div>
+
+      <div id="loading" class="loading hidden">
+        <div class="spinner"></div>
+        <p id="loadingStatus">Fetching transcript...</p>
+      </div>
     </main>
 
-    <div id="chatDock" class="chatDock">
-      <button id="chatJump" type="button" class="chatJump" aria-label="Jump to latest">
-        Jump to latest
-      </button>
-      <div id="chatQueue" class="chatQueue isHidden" aria-live="polite"></div>
-      <div id="inlineError" class="inlineError hidden" role="alert">
-        <div class="inlineError__text" id="inlineErrorMessage"></div>
-        <button id="inlineErrorClose" type="button" class="ghost inlineError__close" aria-label="Dismiss error">
-          ✕
-        </button>
-      </div>
-      <div class="chatInputRow">
-        <textarea id="chatInput" class="chatInput" placeholder="Ask about this page..." rows="1"></textarea>
-        <button id="chatSend" type="button" class="ghost chatSendBtn" aria-label="Send">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
-          </svg>
-        </button>
-      </div>
-    </div>
+    <footer>
+      <button id="fetchBtn" type="button" class="btn btn-primary">Get Transcript</button>
+    </footer>
 
-    <script type="module" src="./main.ts"></script>
+    <script type="module" src="./transcript-main.ts"></script>
   </body>
 </html>
