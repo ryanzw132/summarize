@@ -20,6 +20,7 @@ export type Settings = {
   extendedLogging: boolean
   transcriptMode: boolean
   autoCopyTranscript: boolean
+  includeVideoDetails: boolean
   hoverPrompt: string
   transcriber: string
   model: string
@@ -210,6 +211,7 @@ export const defaultSettings: Settings = {
   extendedLogging: false,
   transcriptMode: false,
   autoCopyTranscript: false,
+  includeVideoDetails: false,
   hoverPrompt:
     'Plain text only (no Markdown). Summarize the linked page concisely in 1-2 sentences; aim for 100-200 characters.',
   transcriber: '',
@@ -291,6 +293,10 @@ export async function loadSettings(): Promise<Settings> {
       typeof raw.autoCopyTranscript === 'boolean'
         ? raw.autoCopyTranscript
         : defaultSettings.autoCopyTranscript,
+    includeVideoDetails:
+      typeof raw.includeVideoDetails === 'boolean'
+        ? raw.includeVideoDetails
+        : defaultSettings.includeVideoDetails,
     hoverPrompt: normalizeHoverPrompt(raw.hoverPrompt),
     transcriber: normalizeTranscriber(raw.transcriber),
     maxChars: typeof raw.maxChars === 'number' ? raw.maxChars : defaultSettings.maxChars,

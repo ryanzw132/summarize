@@ -2237,6 +2237,160 @@ export default defineBackground(() => {
         abortHoverForTab(tabId, (raw as HoverToBg & { type: 'hover:abort' }).requestId)
         return
       }
+
+      // Handle transcript button requests from overlay button content script
+      if (type === 'fetch-transcript-for-button') {
+        const msg = raw as { type: 'fetch-transcript-for-button'; url: string }
+        void (async () => {
+          try {
+            const tabId = sender.tab?.id
+            if (!tabId) {
+              sendResponse({ ok: false, error: 'No active tab' })
+              return
+            }
+
+            const settings = await loadSettings()
+            const token = settings.token?.trim()
+
+            const url = msg.url
+            const isTikTok = /tiktok\.com/i.test(url)
+            const isInstagram = /instagram\.com/i.test(url)
+
+            // Helper to try injecting content script
+            const tryInjectContentScript = async (scriptFile: string): Promise<boolean> => {
+              try {
+                await chrome.scripting.executeScript({
+                  target: { tabId },
+                  files: [scriptFile],
+                })
+                await new Promise((r) => setTimeout(r, 100))
+                return true
+              } catch {
+                return false
+              }
+            }
+
+            // Helper to send message with retry after injection
+            const sendMessageWithRetry = async <T>(
+              messageType: string,
+              scriptFile: string
+            ): Promise<T | null> => {
+              try {
+                const response = await chrome.tabs.sendMessage(tabId, { type: messageType }) as T
+                return response
+              } catch {
+                // Content script not ready, try to inject
+                if (await tryInjectContentScript(scriptFile)) {
+                  try {
+                    return await chrome.tabs.sendMessage(tabId, { type: messageType }) as T
+                  } catch {
+                    return null
+                  }
+                }
+                return null
+              }
+            }
+
+            // For TikTok, try content script extraction first (has native captions)
+            if (isTikTok) {
+              const response = await sendMessageWithRetry<{
+                ok?: boolean
+                text?: string
+                error?: string
+              }>('tiktok-transcript', 'content-scripts/tiktok.js')
+
+              if (response?.ok && response.text) {
+                sendResponse({ ok: true, text: response.text })
+                return
+              }
+              // Fall through to daemon if no captions
+            }
+
+            // For Instagram, try to get video URL from content script for better daemon handling
+            let extractedVideoUrl: string | null = null
+            if (isInstagram) {
+              const response = await sendMessageWithRetry<{
+                ok?: boolean
+                videoUrl?: string
+                error?: string
+              }>('instagram-transcript', 'content-scripts/instagram.js')
+
+              if (response?.ok && response.videoUrl?.startsWith('https://')) {
+                extractedVideoUrl = response.videoUrl
+              }
+            }
+
+            if (!token) {
+              sendResponse({ ok: false, error: 'Setup required' })
+              return
+            }
+
+            // Use extracted video URL if available (for better daemon handling)
+            const urlToFetch = extractedVideoUrl || url
+
+            // Make request to daemon
+            const daemonResponse = await fetch('http://127.0.0.1:8787/v1/summarize', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                url: urlToFetch,
+                mode: 'url',
+                extractOnly: true,
+                timestamps: false,
+                maxCharacters: null,
+                // Enable video transcription mode for Instagram CDN URLs
+                ...(extractedVideoUrl ? { videoMode: 'transcript' } : {}),
+              }),
+            })
+
+            if (!daemonResponse.ok) {
+              const errorData = await daemonResponse.json().catch(() => ({})) as { error?: string }
+              throw new Error(errorData.error || `HTTP ${daemonResponse.status}`)
+            }
+
+            const data = await daemonResponse.json() as {
+              ok?: boolean
+              error?: string
+              extracted?: {
+                content?: string
+                transcriptTimedText?: string
+              }
+            }
+
+            if (!data.ok) {
+              throw new Error(data.error || 'Failed to fetch transcript')
+            }
+
+            let transcriptText = data.extracted?.content || data.extracted?.transcriptTimedText || null
+
+            // Clean up timed text (remove timestamps)
+            if (transcriptText && transcriptText.includes('[')) {
+              transcriptText = transcriptText
+                .replace(/\[\d{1,2}:\d{2}(?::\d{2})?\]\s*/g, '')
+                .replace(/\n+/g, ' ')
+                .trim()
+            }
+
+            if (!transcriptText || transcriptText.trim().length === 0) {
+              throw new Error('No transcript available')
+            }
+
+            sendResponse({ ok: true, text: transcriptText.trim() })
+
+          } catch (err) {
+            const message = err instanceof Error ? err.message : 'Unknown error'
+            if (message.includes('Failed to fetch') || message.includes('NetworkError')) {
+              sendResponse({ ok: false, error: 'Daemon not running' })
+            } else {
+              sendResponse({ ok: false, error: message })
+            }
+          }
+        })()
+        return true
+      }
     }
   )
 

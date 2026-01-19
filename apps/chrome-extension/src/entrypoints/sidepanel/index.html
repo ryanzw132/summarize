@@ -42,7 +42,13 @@
       <div id="transcriptContainer" class="transcript-container hidden">
         <div class="transcript-header">
           <span id="sourceInfo" class="source-info"></span>
-          <button id="copyBtn" type="button" class="btn btn-copy">Copy</button>
+          <div class="transcript-actions">
+            <label class="checkbox-label">
+              <input type="checkbox" id="includeDetailsCheckbox" />
+              <span>Include video details</span>
+            </label>
+            <button id="copyBtn" type="button" class="btn btn-copy">Copy</button>
+          </div>
         </div>
         <div id="transcript" class="transcript"></div>
       </div>

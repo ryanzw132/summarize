@@ -11,6 +11,14 @@ type InstagramTranscriptResponse =
     }
   | { ok: false; error: string; reason: 'no_video' | 'extraction_failed' | 'blob_too_large' }
 
+type InstagramMetadataRequest = { type: 'instagram-metadata' }
+type InstagramMetadataResponse = {
+  title: string | null
+  description: string | null
+  creator: string | null
+  postedAt: string | null
+}
+
 // Maximum blob size to convert to data URL (50MB)
 const MAX_BLOB_SIZE_BYTES = 50 * 1024 * 1024
 
@@ -87,6 +95,88 @@ function extractInstagramVideoInfo(): {
     || null
 
   return { videoUrl, durationSeconds, title }
+}
+
+/**
+ * Extract video metadata from Instagram page.
+ */
+function extractInstagramMetadata(): InstagramMetadataResponse {
+  // Try to get title from og:title meta tag
+  const ogTitle = document.querySelector('meta[property="og:title"]')?.getAttribute('content')
+  const title = ogTitle || document.title || null
+
+  // Get description from og:description
+  const ogDescription = document.querySelector('meta[property="og:description"]')?.getAttribute('content')
+  const description = ogDescription || null
+
+  // Try to extract creator from page
+  // Instagram URLs can be:
+  // - /username/reel/xxx/ (profile-based)
+  // - /reel/xxx/ (direct link)
+  // - /p/xxx/ (direct post link)
+  let creator: string | null = null
+
+  // Try from URL path (e.g., https://www.instagram.com/username/reel/xxx)
+  const pathMatch = window.location.pathname.match(/^\/([^/]+)\/(?:reel|reels|p|tv)\//)
+  if (pathMatch?.[1] && !['reel', 'reels', 'p', 'tv'].includes(pathMatch[1])) {
+    creator = `@${pathMatch[1]}`
+  }
+
+  // If not found in URL, try parsing from title (usually "Username on Instagram: caption...")
+  if (!creator && ogTitle) {
+    const titleMatch = ogTitle.match(/^(.+?) on Instagram:/)
+    if (titleMatch?.[1]) {
+      creator = `@${titleMatch[1].trim()}`
+    }
+  }
+
+  // Also try parsing from description which often has "@username" mentions
+  if (!creator && ogDescription) {
+    const mentionMatch = ogDescription.match(/@([a-zA-Z0-9._]+)/)
+    if (mentionMatch?.[1]) {
+      creator = `@${mentionMatch[1]}`
+    }
+  }
+
+  // Try from LD+JSON
+  let postedAt: string | null = null
+  const scripts = document.querySelectorAll('script[type="application/ld+json"]')
+  for (const script of scripts) {
+    try {
+      const data = JSON.parse(script.textContent || '') as {
+        '@type'?: string
+        uploadDate?: string
+        author?: {
+          name?: string
+          alternateName?: string
+        }
+      }
+      if (data['@type'] === 'VideoObject') {
+        // Get upload date if available
+        if (data.uploadDate) {
+          const date = new Date(data.uploadDate)
+          if (!isNaN(date.getTime())) {
+            postedAt = date.toLocaleDateString('en-US', {
+              year: 'numeric',
+              month: 'long',
+              day: 'numeric',
+            })
+          }
+        }
+        // Get author if we don't have one
+        if (!creator && data.author?.alternateName) {
+          creator = `@${data.author.alternateName}`
+        } else if (!creator && data.author?.name) {
+          creator = `@${data.author.name}`
+        }
+        break
+      }
+    } catch {
+      // Continue to next script
+    }
+  }
+
+  return { title, description, creator, postedAt }
 }
 
 /**
@@ -184,9 +274,9 @@ export default defineContentScript({
 
     chrome.runtime.onMessage.addListener(
       (
-        message: InstagramTranscriptRequest,
+        message: InstagramTranscriptRequest | InstagramMetadataRequest,
         _sender,
-        sendResponse: (response: InstagramTranscriptResponse) => void
+        sendResponse: (response: InstagramTranscriptResponse | InstagramMetadataResponse) => void
       ) => {
         if (message?.type === 'instagram-transcript') {
           extractTranscript()
@@ -200,6 +290,10 @@ export default defineContentScript({
               })
             })
           return true // Keep channel open for async response
+        }
+        if (message?.type === 'instagram-metadata') {
+          sendResponse(extractInstagramMetadata())
+          return false
         }
         return undefined
       }

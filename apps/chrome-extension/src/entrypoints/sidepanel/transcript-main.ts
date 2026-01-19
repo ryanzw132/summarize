@@ -1,4 +1,4 @@
-import { loadSettings } from '../../lib/settings'
+import { loadSettings, patchSettings } from '../../lib/settings'
 
 // Supported URL patterns
 // YouTube: regular videos, shorts, live, embed, and youtu.be short URLs
@@ -36,6 +36,14 @@ type InstagramTranscriptResponse =
     }
   | { ok: false; error: string; reason: 'no_video' | 'extraction_failed' | 'blob_too_large' }
 
+// Metadata response types
+type VideoMetadataResponse = {
+  title: string | null
+  description: string | null
+  creator: string | null
+  postedAt: string | null
+}
+
 // Constants
 const CONTENT_SCRIPT_TIMEOUT_MS = 10000  // 10 seconds
 const MAX_BLOB_SIZE_BYTES = 50 * 1024 * 1024  // 50MB max for data URL encoding
@@ -65,9 +73,11 @@ const transcriptEl = document.getElementById('transcript') as HTMLDivElement
 const loadingEl = document.getElementById('loading') as HTMLDivElement
 const loadingStatusEl = document.getElementById('loadingStatus') as HTMLParagraphElement
 const fetchBtn = document.getElementById('fetchBtn') as HTMLButtonElement
+const includeDetailsCheckbox = document.getElementById('includeDetailsCheckbox') as HTMLInputElement
 
 let currentUrl: string | null = null
 let currentTranscript: string | null = null
+let currentPlatform: Platform = null
 let abortController: AbortController | null = null
 let currentFetchId = 0  // Used to detect stale fetches
 
@@ -138,6 +148,7 @@ function showLoading(status: string) {
 function showTranscript(text: string, platform: Platform, source?: string) {
   hideAll()
   currentTranscript = text
+  currentPlatform = platform
   transcriptEl.textContent = text
 
   const platformName = platform === 'youtube' ? 'YouTube'
@@ -165,16 +176,38 @@ function setProgress(percent: number) {
 async function copyTranscript() {
   if (!currentTranscript) return
 
+  // Disable button and show loading state if fetching metadata
+  const needsMetadata = includeDetailsCheckbox.checked && currentPlatform
+  if (needsMetadata) {
+    copyBtn.textContent = 'Loading...'
+    copyBtn.disabled = true
+  }
+
   try {
-    await navigator.clipboard.writeText(currentTranscript)
+    let textToCopy = currentTranscript
+
+    // If "include video details" is checked, try to fetch and prepend metadata
+    if (needsMetadata) {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+      if (tab?.id) {
+        const metadata = await fetchVideoMetadata(tab.id, currentPlatform)
+        if (metadata) {
+          textToCopy = formatWithMetadata(currentTranscript, metadata)
+        }
+      }
+    }
+
+    await navigator.clipboard.writeText(textToCopy)
     copyBtn.textContent = 'Copied!'
     copyBtn.classList.add('copied')
+    copyBtn.disabled = false
     setTimeout(() => {
       copyBtn.textContent = 'Copy'
       copyBtn.classList.remove('copied')
     }, 2000)
   } catch {
     copyBtn.textContent = 'Failed'
+    copyBtn.disabled = false
     setTimeout(() => {
       copyBtn.textContent = 'Copy'
     }, 2000)
@@ -269,6 +302,61 @@ async function tryContentScriptExtraction(
   }
 
   return null
+}
+
+/**
+ * Fetch video metadata from content script.
+ */
+async function fetchVideoMetadata(
+  tabId: number,
+  platform: Platform
+): Promise<VideoMetadataResponse | null> {
+  if (platform === 'tiktok') {
+    const response = await tryContentScriptMessage<VideoMetadataResponse>(
+      tabId,
+      'tiktok-metadata',
+      'content-scripts/tiktok.js'
+    )
+    return response
+  }
+
+  if (platform === 'instagram') {
+    const response = await tryContentScriptMessage<VideoMetadataResponse>(
+      tabId,
+      'instagram-metadata',
+      'content-scripts/instagram.js'
+    )
+    return response
+  }
+
+  // YouTube metadata not implemented yet via content script
+  return null
+}
+
+/**
+ * Format metadata and transcript for copying.
+ */
+function formatWithMetadata(transcript: string, metadata: VideoMetadataResponse): string {
+  const parts: string[] = []
+
+  if (metadata.title) {
+    parts.push(`Title: ${metadata.title}`)
+  }
+  if (metadata.creator) {
+    parts.push(`Creator: ${metadata.creator}`)
+  }
+  if (metadata.postedAt) {
+    parts.push(`Posted: ${metadata.postedAt}`)
+  }
+  if (metadata.description && metadata.description !== metadata.title) {
+    parts.push(`Description: ${metadata.description}`)
+  }
+
+  if (parts.length > 0) {
+    return parts.join('\n') + '\n\n---\n\n' + transcript
+  }
+
+  return transcript
 }
 
 async function fetchTranscript() {
@@ -479,6 +567,11 @@ openOptionsBtn.addEventListener('click', () => {
   chrome.runtime.openOptionsPage()
 })
 
+// Persist checkbox setting
+includeDetailsCheckbox.addEventListener('change', () => {
+  patchSettings({ includeVideoDetails: includeDetailsCheckbox.checked })
+})
+
 // Listen for tab changes
 chrome.tabs.onActivated.addListener(() => {
   checkCurrentTab()
@@ -490,5 +583,12 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   }
 })
 
-// Initial check
+// Initialize checkbox state from settings
+async function initCheckboxState() {
+  const settings = await loadSettings()
+  includeDetailsCheckbox.checked = settings.includeVideoDetails
+}
+
+// Initial setup
+initCheckboxState()
 checkCurrentTab()

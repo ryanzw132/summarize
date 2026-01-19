@@ -24,6 +24,14 @@ type TikTokTranscriptResponse =
     }
   | { ok: false; error: string; reason: 'no_captions' | 'fetch_failed' | 'parse_failed' | 'extraction_error' }
 
+type TikTokMetadataRequest = { type: 'tiktok-metadata' }
+type TikTokMetadataResponse = {
+  title: string | null
+  description: string | null
+  creator: string | null
+  postedAt: string | null
+}
+
 /**
  * Extract subtitle info from TikTok's `__UNIVERSAL_DATA_FOR_REHYDRATION__` script tag.
  */
@@ -106,6 +114,70 @@ function extractTikTokDurationSeconds(): number | null {
       : null
   } catch {
     return null
+  }
+}
+
+/**
+ * Extract video metadata from TikTok's hydration data.
+ */
+function extractTikTokMetadata(): TikTokMetadataResponse {
+  const scriptEl = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__')
+  if (!scriptEl?.textContent) {
+    return { title: null, description: null, creator: null, postedAt: null }
+  }
+
+  try {
+    const data = JSON.parse(scriptEl.textContent) as {
+      __DEFAULT_SCOPE__?: {
+        'webapp.video-detail'?: {
+          itemInfo?: {
+            itemStruct?: {
+              desc?: string
+              createTime?: number | string
+              author?: {
+                uniqueId?: string
+                nickname?: string
+              }
+            }
+          }
+        }
+      }
+    }
+
+    const itemStruct =
+      data?.__DEFAULT_SCOPE__?.['webapp.video-detail']?.itemInfo?.itemStruct
+
+    if (!itemStruct) {
+      return { title: null, description: null, creator: null, postedAt: null }
+    }
+
+    // Title and description are the same on TikTok (the video caption)
+    const description = itemStruct.desc?.trim() || null
+    const title = description
+
+    // Creator: prefer uniqueId (username), fall back to nickname
+    const creator = itemStruct.author?.uniqueId
+      ? `@${itemStruct.author.uniqueId}`
+      : itemStruct.author?.nickname || null
+
+    // Posted date: convert Unix timestamp to readable format
+    let postedAt: string | null = null
+    const createTime = itemStruct.createTime
+    if (createTime) {
+      const timestamp = typeof createTime === 'string' ? parseInt(createTime, 10) : createTime
+      if (Number.isFinite(timestamp) && timestamp > 0) {
+        const date = new Date(timestamp * 1000)
+        postedAt = date.toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric',
+        })
+      }
+    }
+
+    return { title, description, creator, postedAt }
+  } catch {
+    return { title: null, description: null, creator: null, postedAt: null }
   }
 }
 
@@ -275,9 +347,9 @@ export default defineContentScript({
 
     chrome.runtime.onMessage.addListener(
       (
-        message: TikTokTranscriptRequest,
+        message: TikTokTranscriptRequest | TikTokMetadataRequest,
         _sender,
-        sendResponse: (response: TikTokTranscriptResponse) => void
+        sendResponse: (response: TikTokTranscriptResponse | TikTokMetadataResponse) => void
       ) => {
         if (message?.type === 'tiktok-transcript') {
           extractTranscript()
@@ -291,6 +363,10 @@ export default defineContentScript({
               })
             })
           return true // Keep channel open for async response
+        }
+        if (message?.type === 'tiktok-metadata') {
+          sendResponse(extractTikTokMetadata())
+          return false
         }
         return undefined
       }
