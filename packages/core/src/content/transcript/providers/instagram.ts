@@ -9,8 +9,8 @@ import { resolveTranscriptionAvailability } from './transcription-start.js'
 import { fetchInstagramTranscriptWithYtDlp } from './instagram/yt-dlp.js'
 
 const INSTAGRAM_URL_PATTERN = /(?:^|\.)instagram\.com/i
-// Match /reel/, /reels/, and /p/ (posts which can be videos)
-const INSTAGRAM_REEL_PATH_PATTERN = /\/(?:reel(?:s)?|p)\/[A-Za-z0-9_-]+/i
+// Match /reel/, /reels/, /p/ (posts which can be videos), and /tv/ (IGTV)
+const INSTAGRAM_REEL_PATH_PATTERN = /\/(?:reel(?:s)?|p|tv)\/[A-Za-z0-9_-]+/i
 
 export const canHandle = ({ url }: ProviderContext): boolean => {
   try {

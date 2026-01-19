@@ -34,8 +34,17 @@ describe('Instagram transcript provider - canHandle', () => {
     expect(canHandle({ url: 'https://instagram.com/reels/ABC123', html: null, resourceKey: null })).toBe(true)
   })
 
-  it('does not match regular Instagram posts', () => {
-    expect(canHandle({ url: 'https://www.instagram.com/p/ABC123/', html: null, resourceKey: null })).toBe(false)
+  it('matches instagram.com/p/ posts (can be videos)', () => {
+    expect(canHandle({ url: 'https://www.instagram.com/p/ABC123/', html: null, resourceKey: null })).toBe(true)
+    expect(canHandle({ url: 'https://instagram.com/p/ABC123', html: null, resourceKey: null })).toBe(true)
+  })
+
+  it('matches instagram.com/tv/ IGTV videos', () => {
+    expect(canHandle({ url: 'https://www.instagram.com/tv/ABC123/', html: null, resourceKey: null })).toBe(true)
+    expect(canHandle({ url: 'https://instagram.com/tv/ABC123', html: null, resourceKey: null })).toBe(true)
+  })
+
+  it('does not match profile pages or homepage', () => {
     expect(canHandle({ url: 'https://www.instagram.com/username/', html: null, resourceKey: null })).toBe(false)
     expect(canHandle({ url: 'https://www.instagram.com/', html: null, resourceKey: null })).toBe(false)
   })

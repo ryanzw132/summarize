@@ -1,9 +1,11 @@
 import { loadSettings } from '../../lib/settings'
 
 // Supported URL patterns
-const YOUTUBE_PATTERN = /^https?:\/\/(?:www\.)?youtube\.com\/(?:watch\?v=|shorts\/)/
-const TIKTOK_PATTERN = /^https?:\/\/(?:www\.|vm\.)?tiktok\.com\//
-const INSTAGRAM_PATTERN = /^https?:\/\/(?:www\.)?instagram\.com\/(?:reel|reels|p)\//
+// YouTube: regular videos, shorts, live, embed, and youtu.be short URLs
+const YOUTUBE_PATTERN = /^https?:\/\/(?:(?:www\.|m\.)?youtube\.com\/(?:watch\?|shorts\/|live\/|embed\/|v\/)|youtu\.be\/)/
+const TIKTOK_PATTERN = /^https?:\/\/(?:(?:www|vm|m)\.)?tiktok\.com\//
+// Instagram: reels, posts, and IGTV
+const INSTAGRAM_PATTERN = /^https?:\/\/(?:www\.)?instagram\.com\/(?:reel|reels|p|tv)\//
 
 type Platform = 'youtube' | 'tiktok' | 'instagram' | null
 
@@ -141,6 +143,24 @@ async function copyTranscript() {
 }
 
 /**
+ * Inject a content script dynamically if needed.
+ */
+async function ensureContentScriptInjected(tabId: number, scriptFile: string): Promise<boolean> {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: [scriptFile],
+    })
+    // Small delay to let the script initialize
+    await new Promise(resolve => setTimeout(resolve, 100))
+    return true
+  } catch (err) {
+    console.log(`[Transcript] Failed to inject ${scriptFile}:`, err)
+    return false
+  }
+}
+
+/**
  * Try to extract transcript directly from page via content script.
  * Returns the transcript text if successful, or video URL for further processing.
  */
@@ -149,34 +169,57 @@ async function tryContentScriptExtraction(
   platform: Platform
 ): Promise<{ text: string; source: string } | { videoUrl: string; source: string } | null> {
   if (platform === 'tiktok') {
+    let response: TikTokTranscriptResponse | null = null
     try {
-      const response = await chrome.tabs.sendMessage(tabId, { type: 'tiktok-transcript' }) as TikTokTranscriptResponse
-      if (response?.ok && response.text) {
-        return { text: response.text, source: 'tiktok-captions' }
+      response = await chrome.tabs.sendMessage(tabId, { type: 'tiktok-transcript' }) as TikTokTranscriptResponse
+    } catch {
+      // Content script not injected, try to inject it
+      console.log('[Transcript] TikTok content script not found, injecting...')
+      if (await ensureContentScriptInjected(tabId, 'content-scripts/tiktok.js')) {
+        try {
+          response = await chrome.tabs.sendMessage(tabId, { type: 'tiktok-transcript' }) as TikTokTranscriptResponse
+        } catch (err) {
+          console.log('[Transcript] TikTok content script still not responding:', err)
+        }
       }
-      // Content script couldn't get captions, fall back to daemon
-      console.log('[Transcript] TikTok content script:', response?.ok ? 'empty' : response?.reason)
-    } catch (err) {
-      // Content script not injected or error
-      console.log('[Transcript] TikTok content script error:', err)
+    }
+
+    if (response?.ok && response.text) {
+      return { text: response.text, source: 'tiktok-captions' }
+    }
+    if (response && !response.ok) {
+      console.log('[Transcript] TikTok content script:', response.reason)
     }
   }
 
   if (platform === 'instagram') {
+    let response: InstagramTranscriptResponse | null = null
     try {
-      const response = await chrome.tabs.sendMessage(tabId, { type: 'instagram-transcript' }) as InstagramTranscriptResponse
-      if (response?.ok && response.videoUrl) {
-        // Instagram returns video URL - check if it's a usable CDN URL
-        const videoUrl = response.videoUrl
-        // CDN URLs from Instagram are typically accessible without auth
-        if (videoUrl.startsWith('https://') && !videoUrl.startsWith('blob:') && !videoUrl.startsWith('data:')) {
-          console.log('[Transcript] Instagram video URL extracted:', videoUrl.slice(0, 100) + '...')
-          return { videoUrl, source: 'instagram-video' }
+      response = await chrome.tabs.sendMessage(tabId, { type: 'instagram-transcript' }) as InstagramTranscriptResponse
+    } catch {
+      // Content script not injected, try to inject it
+      console.log('[Transcript] Instagram content script not found, injecting...')
+      if (await ensureContentScriptInjected(tabId, 'content-scripts/instagram.js')) {
+        try {
+          response = await chrome.tabs.sendMessage(tabId, { type: 'instagram-transcript' }) as InstagramTranscriptResponse
+        } catch (err) {
+          console.log('[Transcript] Instagram content script still not responding:', err)
         }
-        console.log('[Transcript] Instagram video URL is not a CDN URL, cannot use')
       }
-    } catch (err) {
-      console.log('[Transcript] Instagram content script error:', err)
+    }
+
+    if (response?.ok && response.videoUrl) {
+      // Instagram returns video URL - check if it's a usable CDN URL
+      const videoUrl = response.videoUrl
+      // CDN URLs from Instagram are typically accessible without auth
+      if (videoUrl.startsWith('https://') && !videoUrl.startsWith('blob:') && !videoUrl.startsWith('data:')) {
+        console.log('[Transcript] Instagram video URL extracted:', videoUrl.slice(0, 100) + '...')
+        return { videoUrl, source: 'instagram-video' }
+      }
+      console.log('[Transcript] Instagram video URL is not a CDN URL, cannot use')
+    }
+    if (response && !response.ok) {
+      console.log('[Transcript] Instagram content script:', response.reason)
     }
   }
 

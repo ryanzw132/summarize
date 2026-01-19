@@ -47,6 +47,12 @@
    - Tries content script extraction first for TikTok/Instagram
    - Falls back to daemon if content script fails
    - Progress indicators for multi-step extraction
+   - Dynamic content script injection if scripts aren't loaded
+
+4. **URL Pattern Improvements**
+   - YouTube: Added support for `/live/`, `/embed/`, `/v/`, `youtu.be`, and `m.youtube.com`
+   - TikTok: Added support for `m.tiktok.com` mobile URLs
+   - Instagram: Added support for `/tv/` (IGTV) and `/p/` (posts with videos)
 
 ### Browser Cookies for yt-dlp
 - YouTube and Instagram providers now use `--cookies-from-browser chrome` by default
