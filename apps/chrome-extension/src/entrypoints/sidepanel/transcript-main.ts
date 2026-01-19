@@ -7,6 +7,26 @@ const INSTAGRAM_PATTERN = /^https?:\/\/(?:www\.)?instagram\.com\/(?:reel|reels|p
 
 type Platform = 'youtube' | 'tiktok' | 'instagram' | null
 
+// Content script response types
+type TikTokTranscriptResponse =
+  | {
+      ok: true
+      text: string
+      source: 'tiktok-captions'
+      durationSeconds: number | null
+    }
+  | { ok: false; error: string; reason: string }
+
+type InstagramTranscriptResponse =
+  | {
+      ok: true
+      videoUrl: string
+      source: 'instagram-video'
+      durationSeconds: number | null
+      title: string | null
+    }
+  | { ok: false; error: string; reason: string }
+
 function detectPlatform(url: string): Platform {
   if (YOUTUBE_PATTERN.test(url)) return 'youtube'
   if (TIKTOK_PATTERN.test(url)) return 'tiktok'
@@ -120,6 +140,46 @@ async function copyTranscript() {
   }
 }
 
+/**
+ * Try to extract transcript directly from page via content script.
+ * Returns the transcript text if successful, null if should fall back to daemon.
+ */
+async function tryContentScriptExtraction(
+  tabId: number,
+  platform: Platform
+): Promise<{ text: string; source: string } | null> {
+  if (platform === 'tiktok') {
+    try {
+      const response = await chrome.tabs.sendMessage(tabId, { type: 'tiktok-transcript' }) as TikTokTranscriptResponse
+      if (response?.ok && response.text) {
+        return { text: response.text, source: 'tiktok-captions' }
+      }
+      // Content script couldn't get captions, fall back to daemon
+      console.log('[Transcript] TikTok content script:', response?.ok ? 'empty' : response?.reason)
+    } catch (err) {
+      // Content script not injected or error
+      console.log('[Transcript] TikTok content script error:', err)
+    }
+  }
+
+  if (platform === 'instagram') {
+    try {
+      const response = await chrome.tabs.sendMessage(tabId, { type: 'instagram-transcript' }) as InstagramTranscriptResponse
+      if (response?.ok && response.videoUrl) {
+        // Instagram returns video URL, not transcript text
+        // We'll pass this to daemon for transcription
+        console.log('[Transcript] Instagram video URL extracted, will transcribe via daemon')
+        // Return null to fall back to daemon, but we could potentially
+        // send the video URL to daemon directly in the future
+      }
+    } catch (err) {
+      console.log('[Transcript] Instagram content script error:', err)
+    }
+  }
+
+  return null
+}
+
 async function fetchTranscript() {
   if (!currentUrl) return
 
@@ -136,17 +196,38 @@ async function fetchTranscript() {
     const settings = await loadSettings()
     const token = settings.token?.trim()
 
+    // Get the active tab
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+    const title = tab?.title || null
+    const tabId = tab?.id
+
+    // For TikTok and Instagram, try content script extraction first
+    if ((platform === 'tiktok' || platform === 'instagram') && tabId) {
+      const platformLabel = platform === 'tiktok' ? 'TikTok' : 'Instagram'
+      showLoading(`Checking ${platformLabel} for captions...`)
+      setStatus('Extracting from page...')
+      setProgress(20)
+
+      const contentResult = await tryContentScriptExtraction(tabId, platform)
+      if (contentResult) {
+        setProgress(100)
+        setStatus('Done')
+        showTranscript(contentResult.text, platform, contentResult.source)
+        return
+      }
+
+      // Content script didn't get transcript, fall back to daemon
+      setStatus('No captions found, trying server...')
+      setProgress(30)
+    }
+
     if (!token) {
       showSetup()
       return
     }
 
     showLoading(`Fetching ${platform === 'youtube' ? 'YouTube' : platform === 'tiktok' ? 'TikTok' : 'Instagram'} transcript...`)
-    setStatus('Connecting...')
-
-    // Get the active tab's title
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
-    const title = tab?.title || null
+    setStatus('Connecting to daemon...')
 
     // Make request to daemon
     const response = await fetch('http://127.0.0.1:8787/v1/summarize', {
