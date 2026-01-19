@@ -8,21 +8,65 @@
 - yt-dlp + whisper.cpp fallback works with `--cookies-from-browser chrome`
 
 ### TikTok
-- **Status:** Blocked by IP
-- Server-side HTML fetch returns empty (can't extract native captions)
-- yt-dlp returns "Your IP address is blocked from accessing this post"
-- Native caption extraction code exists in `tiktok/captions.ts` but can't reach TikTok servers
+- **Status:** Partially Working (via content script)
+- **Content Script (NEW):** Extracts native captions directly from page when available
+  - File: `apps/chrome-extension/src/entrypoints/tiktok.content.ts`
+  - Extracts from `__UNIVERSAL_DATA_FOR_REHYDRATION__` in page context
+  - Fetches WebVTT captions without IP blocking
+- **Server-side (blocked):** IP blocked, yt-dlp fallback doesn't work
+- ~60-70% of TikTok videos have native captions
 
 ### Instagram Reels
-- **Status:** Blocked by API changes
-- yt-dlp returns "Instagram sent an empty media response" even with cookies
-- Known ongoing issue with yt-dlp and Instagram's API
+- **Status:** Content Script Implemented, Transcription Still Blocked
+- **Content Script (NEW):** Extracts video URL from page
+  - File: `apps/chrome-extension/src/entrypoints/instagram.content.ts`
+  - Can get video blob/URL from authenticated page context
+- **Limitation:** Instagram has no native captions, requires Whisper transcription
+- **Server-side (blocked):** yt-dlp returns empty response even with cookies
+
+---
+
+## What Was Implemented
+
+### Content Scripts (Chrome Extension)
+1. **TikTok Content Script** (`apps/chrome-extension/src/entrypoints/tiktok.content.ts`)
+   - Extracts native captions from page's hydration data
+   - Fetches and parses WebVTT captions
+   - Works when user has the TikTok page open
+   - Bypasses IP blocking since it runs in user's browser context
+
+2. **Instagram Content Script** (`apps/chrome-extension/src/entrypoints/instagram.content.ts`)
+   - Extracts video URL from authenticated page
+   - Can capture video blob from page
+   - Ready for future enhancement to send video for transcription
+
+3. **Sidepanel Integration** (`apps/chrome-extension/src/entrypoints/sidepanel/transcript-main.ts`)
+   - Tries content script extraction first for TikTok/Instagram
+   - Falls back to daemon if content script fails
+   - Progress indicators for multi-step extraction
+
+### Browser Cookies for yt-dlp
+- YouTube and Instagram providers now use `--cookies-from-browser chrome` by default
+- Helps with bot detection on YouTube
+- Can be disabled via environment variables
 
 ---
 
 ## Future Improvements Needed
 
-### 1. Browser Automation for TikTok/Instagram
+### Priority 1: Instagram Audio Transcription via Content Script
+The Instagram content script extracts video URLs but can't transcribe without Whisper.
+Options:
+- **Send video URL to daemon** for transcription (if URL is accessible)
+- **Download video blob in content script**, convert to base64, send to daemon
+- **Use Web Audio API** to capture audio stream and send for transcription
+
+### Priority 2: TikTok Fallback for Videos Without Captions
+~30-40% of TikTok videos don't have native captions. Options:
+- Same approach as Instagram: extract video URL/blob for daemon transcription
+- Enhance content script to also extract video for Whisper fallback
+
+### 3. Browser Automation for TikTok/Instagram (Alternative Approach)
 Both platforms actively block server-side requests. Options:
 
 **Option A: Puppeteer/Playwright Integration**
