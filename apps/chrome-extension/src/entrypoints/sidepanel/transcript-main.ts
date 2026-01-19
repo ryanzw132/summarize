@@ -3,7 +3,7 @@ import { loadSettings } from '../../lib/settings'
 // Supported URL patterns
 const YOUTUBE_PATTERN = /^https?:\/\/(?:www\.)?youtube\.com\/(?:watch\?v=|shorts\/)/
 const TIKTOK_PATTERN = /^https?:\/\/(?:www\.|vm\.)?tiktok\.com\//
-const INSTAGRAM_PATTERN = /^https?:\/\/(?:www\.)?instagram\.com\/(?:reel|reels)\//
+const INSTAGRAM_PATTERN = /^https?:\/\/(?:www\.)?instagram\.com\/(?:reel|reels|p)\//
 
 type Platform = 'youtube' | 'tiktok' | 'instagram' | null
 
