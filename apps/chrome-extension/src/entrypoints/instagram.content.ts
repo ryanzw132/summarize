@@ -9,7 +9,10 @@ type InstagramTranscriptResponse =
       durationSeconds: number | null
       title: string | null
     }
-  | { ok: false; error: string; reason: 'no_video' | 'extraction_failed' }
+  | { ok: false; error: string; reason: 'no_video' | 'extraction_failed' | 'blob_too_large' }
+
+// Maximum blob size to convert to data URL (50MB)
+const MAX_BLOB_SIZE_BYTES = 50 * 1024 * 1024
 
 /**
  * Extract video URL from Instagram Reel page.
@@ -122,6 +125,16 @@ async function extractTranscript(): Promise<InstagramTranscriptResponse> {
     // Try to capture video blob as fallback
     const captured = await captureVideoBlob()
     if (captured) {
+      // Check blob size before converting to data URL
+      if (captured.blob.size > MAX_BLOB_SIZE_BYTES) {
+        const sizeMB = (captured.blob.size / 1024 / 1024).toFixed(1)
+        return {
+          ok: false,
+          error: `Video is too large (${sizeMB}MB) to process. Max size is 50MB.`,
+          reason: 'blob_too_large',
+        }
+      }
+
       // Convert blob to base64 data URL for transport
       return new Promise((resolve) => {
         const reader = new FileReader()
@@ -137,8 +150,8 @@ async function extractTranscript(): Promise<InstagramTranscriptResponse> {
         reader.onerror = () => {
           resolve({
             ok: false,
-            error: 'No video found on this Instagram page',
-            reason: 'no_video',
+            error: 'Failed to read video data',
+            reason: 'extraction_failed',
           })
         }
         reader.readAsDataURL(captured.blob)
@@ -176,7 +189,16 @@ export default defineContentScript({
         sendResponse: (response: InstagramTranscriptResponse) => void
       ) => {
         if (message?.type === 'instagram-transcript') {
-          extractTranscript().then(sendResponse)
+          extractTranscript()
+            .then(sendResponse)
+            .catch((err) => {
+              console.error('[Instagram Content Script] Extraction error:', err)
+              sendResponse({
+                ok: false,
+                error: `Extraction failed: ${err instanceof Error ? err.message : String(err)}`,
+                reason: 'extraction_failed',
+              })
+            })
           return true // Keep channel open for async response
         }
         return undefined

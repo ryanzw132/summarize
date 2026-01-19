@@ -10,14 +10,21 @@ const INSTAGRAM_PATTERN = /^https?:\/\/(?:www\.)?instagram\.com\/(?:reel|reels|p
 type Platform = 'youtube' | 'tiktok' | 'instagram' | null
 
 // Content script response types
+interface TranscriptSegment {
+  startMs: number
+  endMs: number
+  text: string
+}
+
 type TikTokTranscriptResponse =
   | {
       ok: true
       text: string
+      segments: TranscriptSegment[]
       source: 'tiktok-captions'
       durationSeconds: number | null
     }
-  | { ok: false; error: string; reason: string }
+  | { ok: false; error: string; reason: 'no_captions' | 'fetch_failed' | 'parse_failed' | 'extraction_error' }
 
 type InstagramTranscriptResponse =
   | {
@@ -27,7 +34,11 @@ type InstagramTranscriptResponse =
       durationSeconds: number | null
       title: string | null
     }
-  | { ok: false; error: string; reason: string }
+  | { ok: false; error: string; reason: 'no_video' | 'extraction_failed' | 'blob_too_large' }
+
+// Constants
+const CONTENT_SCRIPT_TIMEOUT_MS = 10000  // 10 seconds
+const MAX_BLOB_SIZE_BYTES = 50 * 1024 * 1024  // 50MB max for data URL encoding
 
 function detectPlatform(url: string): Platform {
   if (YOUTUBE_PATTERN.test(url)) return 'youtube'
@@ -58,6 +69,34 @@ const fetchBtn = document.getElementById('fetchBtn') as HTMLButtonElement
 let currentUrl: string | null = null
 let currentTranscript: string | null = null
 let abortController: AbortController | null = null
+let currentFetchId = 0  // Used to detect stale fetches
+
+/**
+ * Send a message to a content script with a timeout.
+ */
+async function sendMessageWithTimeout<T>(
+  tabId: number,
+  message: { type: string },
+  timeoutMs: number = CONTENT_SCRIPT_TIMEOUT_MS
+): Promise<T | null> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      console.log(`[Transcript] Message timeout for ${message.type}`)
+      resolve(null)
+    }, timeoutMs)
+
+    chrome.tabs.sendMessage(tabId, message)
+      .then((response: T) => {
+        clearTimeout(timer)
+        resolve(response)
+      })
+      .catch((err) => {
+        clearTimeout(timer)
+        console.log(`[Transcript] Message error for ${message.type}:`, err)
+        resolve(null)
+      })
+  })
+}
 
 function hideAll() {
   setupEl.classList.add('hidden')
@@ -161,6 +200,31 @@ async function ensureContentScriptInjected(tabId: number, scriptFile: string): P
 }
 
 /**
+ * Try to send a message to content script, with fallback to dynamic injection.
+ */
+async function tryContentScriptMessage<T>(
+  tabId: number,
+  messageType: string,
+  scriptFile: string
+): Promise<T | null> {
+  // First try with existing content script
+  let response = await sendMessageWithTimeout<T>(tabId, { type: messageType })
+
+  if (response === null) {
+    // Content script might not be injected, try to inject it
+    console.log(`[Transcript] Content script not responding for ${messageType}, injecting...`)
+    if (await ensureContentScriptInjected(tabId, scriptFile)) {
+      response = await sendMessageWithTimeout<T>(tabId, { type: messageType })
+      if (response === null) {
+        console.log(`[Transcript] Content script still not responding after injection`)
+      }
+    }
+  }
+
+  return response
+}
+
+/**
  * Try to extract transcript directly from page via content script.
  * Returns the transcript text if successful, or video URL for further processing.
  */
@@ -169,57 +233,38 @@ async function tryContentScriptExtraction(
   platform: Platform
 ): Promise<{ text: string; source: string } | { videoUrl: string; source: string } | null> {
   if (platform === 'tiktok') {
-    let response: TikTokTranscriptResponse | null = null
-    try {
-      response = await chrome.tabs.sendMessage(tabId, { type: 'tiktok-transcript' }) as TikTokTranscriptResponse
-    } catch {
-      // Content script not injected, try to inject it
-      console.log('[Transcript] TikTok content script not found, injecting...')
-      if (await ensureContentScriptInjected(tabId, 'content-scripts/tiktok.js')) {
-        try {
-          response = await chrome.tabs.sendMessage(tabId, { type: 'tiktok-transcript' }) as TikTokTranscriptResponse
-        } catch (err) {
-          console.log('[Transcript] TikTok content script still not responding:', err)
-        }
-      }
-    }
+    const response = await tryContentScriptMessage<TikTokTranscriptResponse>(
+      tabId,
+      'tiktok-transcript',
+      'content-scripts/tiktok.js'
+    )
 
     if (response?.ok && response.text) {
       return { text: response.text, source: 'tiktok-captions' }
     }
     if (response && !response.ok) {
-      console.log('[Transcript] TikTok content script:', response.reason)
+      console.log('[Transcript] TikTok content script:', response.reason, '-', response.error)
     }
   }
 
   if (platform === 'instagram') {
-    let response: InstagramTranscriptResponse | null = null
-    try {
-      response = await chrome.tabs.sendMessage(tabId, { type: 'instagram-transcript' }) as InstagramTranscriptResponse
-    } catch {
-      // Content script not injected, try to inject it
-      console.log('[Transcript] Instagram content script not found, injecting...')
-      if (await ensureContentScriptInjected(tabId, 'content-scripts/instagram.js')) {
-        try {
-          response = await chrome.tabs.sendMessage(tabId, { type: 'instagram-transcript' }) as InstagramTranscriptResponse
-        } catch (err) {
-          console.log('[Transcript] Instagram content script still not responding:', err)
-        }
-      }
-    }
+    const response = await tryContentScriptMessage<InstagramTranscriptResponse>(
+      tabId,
+      'instagram-transcript',
+      'content-scripts/instagram.js'
+    )
 
     if (response?.ok && response.videoUrl) {
-      // Instagram returns video URL - check if it's a usable CDN URL
       const videoUrl = response.videoUrl
-      // CDN URLs from Instagram are typically accessible without auth
-      if (videoUrl.startsWith('https://') && !videoUrl.startsWith('blob:') && !videoUrl.startsWith('data:')) {
+      // Only accept proper HTTPS CDN URLs (not blob: or data:)
+      if (videoUrl.startsWith('https://')) {
         console.log('[Transcript] Instagram video URL extracted:', videoUrl.slice(0, 100) + '...')
         return { videoUrl, source: 'instagram-video' }
       }
-      console.log('[Transcript] Instagram video URL is not a CDN URL, cannot use')
+      console.log('[Transcript] Instagram video URL is not usable:', videoUrl.slice(0, 50))
     }
     if (response && !response.ok) {
-      console.log('[Transcript] Instagram content script:', response.reason)
+      console.log('[Transcript] Instagram content script:', response.reason, '-', response.error)
     }
   }
 
@@ -234,6 +279,12 @@ async function fetchTranscript() {
     showUnsupported()
     return
   }
+
+  // Increment fetchId to detect stale fetches
+  const thisFetchId = ++currentFetchId
+
+  // Helper to check if this fetch is still current
+  const isStale = () => thisFetchId !== currentFetchId
 
   abortController?.abort()
   abortController = new AbortController()
@@ -256,6 +307,10 @@ async function fetchTranscript() {
       setProgress(20)
 
       const contentResult = await tryContentScriptExtraction(tabId, platform)
+
+      // Check for stale fetch after async operation
+      if (isStale()) return
+
       if (contentResult && 'text' in contentResult) {
         // Got transcript text directly (TikTok captions)
         setProgress(100)
@@ -275,12 +330,18 @@ async function fetchTranscript() {
       }
     }
 
+    // Check token before making daemon request
     if (!token) {
       showSetup()
       return
     }
 
-    showLoading(`Fetching ${platform === 'youtube' ? 'YouTube' : platform === 'tiktok' ? 'TikTok' : 'Instagram'} transcript...`)
+    // For YouTube, show loading immediately since we always use daemon
+    if (platform === 'youtube') {
+      showLoading('Fetching YouTube transcript...')
+    } else {
+      showLoading(`Fetching ${platform === 'tiktok' ? 'TikTok' : 'Instagram'} transcript...`)
+    }
     setStatus('Connecting to daemon...')
 
     // Use extracted video URL if available (for Instagram CDN URLs)
@@ -308,6 +369,9 @@ async function fetchTranscript() {
       signal: abortController.signal,
     })
 
+    // Check for stale fetch after daemon request
+    if (isStale()) return
+
     setProgress(60)
     setStatus('Processing...')
 
@@ -324,6 +388,9 @@ async function fetchTranscript() {
         transcriptTimedText?: string
       }
     }
+
+    // Check for stale fetch after parsing response
+    if (isStale()) return
 
     if (!data.ok) {
       throw new Error(data.error || 'Failed to fetch transcript')
@@ -352,7 +419,9 @@ async function fetchTranscript() {
     showTranscript(transcriptText.trim(), platform, 'extracted')
 
   } catch (err) {
+    // Ignore errors from aborted or stale fetches
     if ((err as Error).name === 'AbortError') return
+    if (isStale()) return
 
     const message = err instanceof Error ? err.message : 'Unknown error'
     setStatus('Error')

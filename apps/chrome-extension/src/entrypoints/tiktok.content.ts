@@ -22,7 +22,7 @@ type TikTokTranscriptResponse =
       source: 'tiktok-captions'
       durationSeconds: number | null
     }
-  | { ok: false; error: string; reason: 'no_captions' | 'fetch_failed' | 'parse_failed' }
+  | { ok: false; error: string; reason: 'no_captions' | 'fetch_failed' | 'parse_failed' | 'extraction_error' }
 
 /**
  * Extract subtitle info from TikTok's `__UNIVERSAL_DATA_FOR_REHYDRATION__` script tag.
@@ -280,7 +280,16 @@ export default defineContentScript({
         sendResponse: (response: TikTokTranscriptResponse) => void
       ) => {
         if (message?.type === 'tiktok-transcript') {
-          extractTranscript().then(sendResponse)
+          extractTranscript()
+            .then(sendResponse)
+            .catch((err) => {
+              console.error('[TikTok Content Script] Extraction error:', err)
+              sendResponse({
+                ok: false,
+                error: `Extraction failed: ${err instanceof Error ? err.message : String(err)}`,
+                reason: 'extraction_error',
+              })
+            })
           return true // Keep channel open for async response
         }
         return undefined
