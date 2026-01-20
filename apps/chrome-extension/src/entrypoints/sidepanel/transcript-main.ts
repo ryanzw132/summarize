@@ -54,7 +54,7 @@ type VideoMetadataResponse = {
 
 // Constants
 const CONTENT_SCRIPT_TIMEOUT_MS = 10000  // 10 seconds
-const DAEMON_REQUEST_TIMEOUT_MS = 60000  // 60 seconds for daemon (includes Whisper transcription)
+const DAEMON_REQUEST_TIMEOUT_MS = 30000  // 30 seconds for daemon request
 const MAX_BLOB_SIZE_BYTES = 50 * 1024 * 1024  // 50MB max for data URL encoding
 
 // Error codes for debugging
@@ -172,19 +172,31 @@ async function fetchWithTimeout(
   timeoutMs: number
 ): Promise<Response> {
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+  const timeoutId = setTimeout(() => {
+    console.log('[Transcript] Fetch timeout triggered after', timeoutMs, 'ms')
+    controller.abort()
+  }, timeoutMs)
 
   try {
+    console.log('[Transcript] Starting fetch to', url)
     const response = await fetch(url, {
       ...options,
       signal: controller.signal,
     })
     clearTimeout(timeoutId)
+    console.log('[Transcript] Fetch completed with status', response.status)
     return response
   } catch (err) {
     clearTimeout(timeoutId)
-    if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error('Request timed out')
+    console.log('[Transcript] Fetch error:', err)
+    if (err instanceof Error) {
+      if (err.name === 'AbortError') {
+        throw new Error('Request timed out after ' + (timeoutMs / 1000) + ' seconds')
+      }
+      // Network errors (daemon not running)
+      if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError') || err.message.includes('fetch')) {
+        throw new Error('Cannot connect to daemon - is it running?')
+      }
     }
     throw err
   }
@@ -584,16 +596,16 @@ async function fetchTranscript() {
   abortController?.abort()
   abortController = new AbortController()
 
-  // Safety timeout - if nothing happens for 90 seconds, show error
+  // Safety timeout - if nothing happens for 45 seconds, show error
   const safetyTimeoutId = setTimeout(() => {
     if (!isStale()) {
       showError(
-        'Request timed out after 90 seconds. Please try again.',
+        'Request timed out. Please check if the daemon is running.',
         'ERR_SAFETY_TIMEOUT',
-        'No response received from content script or daemon within 90 seconds'
+        'No response received within 45 seconds'
       )
     }
-  }, 90000)
+  }, 45000)
 
   try {
     const settings = await loadSettings()
@@ -654,6 +666,7 @@ async function fetchTranscript() {
       showLoading(`Fetching ${platform === 'tiktok' ? 'TikTok' : 'Instagram'} transcript...`)
     }
     setStatus('Connecting to daemon...')
+    console.log('[Transcript] Making daemon request...')
 
     // Use extracted video URL if available (for Instagram CDN URLs)
     // This allows the daemon to transcribe the video directly without needing auth
