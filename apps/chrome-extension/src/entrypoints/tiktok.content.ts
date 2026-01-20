@@ -25,12 +25,21 @@ type TikTokTranscriptResponse =
   | { ok: false; error: string; reason: 'no_captions' | 'fetch_failed' | 'parse_failed' | 'extraction_error' }
 
 type TikTokMetadataRequest = { type: 'tiktok-metadata' }
+type TikTokScrollNextRequest = { type: 'tiktok-scroll-next' }
+type TikTokScrollNextResponse = { ok: boolean }
 type TikTokMetadataResponse = {
   title: string | null
   description: string | null
   creator: string | null
   postedAt: string | null
   hashtags: string[]
+  platform: 'tiktok'
+  stats: {
+    views: number | null
+    likes: number | null
+    comments: number | null
+    shares: number | null
+  }
 }
 
 /**
@@ -135,9 +144,19 @@ function extractHashtags(text: string | null): string[] {
  * Extract video metadata from TikTok's hydration data.
  */
 function extractTikTokMetadata(): TikTokMetadataResponse {
+  const emptyResponse: TikTokMetadataResponse = {
+    title: null,
+    description: null,
+    creator: null,
+    postedAt: null,
+    hashtags: [],
+    platform: 'tiktok',
+    stats: { views: null, likes: null, comments: null, shares: null },
+  }
+
   const scriptEl = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__')
   if (!scriptEl?.textContent) {
-    return { title: null, description: null, creator: null, postedAt: null, hashtags: [] }
+    return emptyResponse
   }
 
   try {
@@ -152,6 +171,12 @@ function extractTikTokMetadata(): TikTokMetadataResponse {
                 uniqueId?: string
                 nickname?: string
               }
+              stats?: {
+                playCount?: number
+                diggCount?: number
+                commentCount?: number
+                shareCount?: number
+              }
             }
           }
         }
@@ -162,7 +187,7 @@ function extractTikTokMetadata(): TikTokMetadataResponse {
       data?.__DEFAULT_SCOPE__?.['webapp.video-detail']?.itemInfo?.itemStruct
 
     if (!itemStruct) {
-      return { title: null, description: null, creator: null, postedAt: null, hashtags: [] }
+      return emptyResponse
     }
 
     // Title and description are the same on TikTok (the video caption)
@@ -192,9 +217,20 @@ function extractTikTokMetadata(): TikTokMetadataResponse {
       }
     }
 
-    return { title, description, creator, postedAt, hashtags }
+    // Extract stats (with NaN validation)
+    const statsData = itemStruct.stats
+    const isValidNumber = (n: unknown): n is number =>
+      typeof n === 'number' && Number.isFinite(n) && n >= 0
+    const stats = {
+      views: isValidNumber(statsData?.playCount) ? statsData.playCount : null,
+      likes: isValidNumber(statsData?.diggCount) ? statsData.diggCount : null,
+      comments: isValidNumber(statsData?.commentCount) ? statsData.commentCount : null,
+      shares: isValidNumber(statsData?.shareCount) ? statsData.shareCount : null,
+    }
+
+    return { title, description, creator, postedAt, hashtags, platform: 'tiktok', stats }
   } catch {
-    return { title: null, description: null, creator: null, postedAt: null, hashtags: [] }
+    return emptyResponse
   }
 }
 
@@ -323,6 +359,50 @@ async function fetchTikTokCaptions(
   }
 }
 
+/**
+ * Scroll to the next TikTok video in feed.
+ */
+function scrollToNextVideo(): TikTokScrollNextResponse {
+  try {
+    // TikTok uses a vertical swipe to navigate between videos
+    // Try to find and click the down arrow button, or simulate scroll
+
+    // Method 1: Try to find navigation button
+    const downButton = document.querySelector('[data-e2e="arrow-right"]') as HTMLElement
+      || document.querySelector('button[class*="ButtonBasicButtonContainer"][class*="StyledArrowDown"]') as HTMLElement
+
+    if (downButton) {
+      downButton.click()
+      return { ok: true }
+    }
+
+    // Method 2: Simulate keyboard down arrow
+    const event = new KeyboardEvent('keydown', {
+      key: 'ArrowDown',
+      code: 'ArrowDown',
+      keyCode: 40,
+      which: 40,
+      bubbles: true,
+    })
+    document.dispatchEvent(event)
+
+    // Also try scrolling the container
+    const videoContainer = document.querySelector('[class*="DivVideoFeedV2"]')
+      || document.querySelector('[class*="DivItemContainer"]')?.parentElement
+      || document.querySelector('main')
+
+    if (videoContainer) {
+      videoContainer.scrollBy({ top: window.innerHeight, behavior: 'smooth' })
+    } else {
+      window.scrollBy({ top: window.innerHeight, behavior: 'smooth' })
+    }
+
+    return { ok: true }
+  } catch {
+    return { ok: false }
+  }
+}
+
 async function extractTranscript(): Promise<TikTokTranscriptResponse> {
   const subtitleInfos = extractTikTokSubtitleInfos()
   const durationSeconds = extractTikTokDurationSeconds()
@@ -364,9 +444,9 @@ export default defineContentScript({
 
     chrome.runtime.onMessage.addListener(
       (
-        message: TikTokTranscriptRequest | TikTokMetadataRequest,
+        message: TikTokTranscriptRequest | TikTokMetadataRequest | TikTokScrollNextRequest,
         _sender,
-        sendResponse: (response: TikTokTranscriptResponse | TikTokMetadataResponse) => void
+        sendResponse: (response: TikTokTranscriptResponse | TikTokMetadataResponse | TikTokScrollNextResponse) => void
       ) => {
         if (message?.type === 'tiktok-transcript') {
           extractTranscript()
@@ -383,6 +463,10 @@ export default defineContentScript({
         }
         if (message?.type === 'tiktok-metadata') {
           sendResponse(extractTikTokMetadata())
+          return false
+        }
+        if (message?.type === 'tiktok-scroll-next') {
+          sendResponse(scrollToNextVideo())
           return false
         }
         return undefined

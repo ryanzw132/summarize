@@ -43,6 +43,13 @@ type VideoMetadataResponse = {
   creator: string | null
   postedAt: string | null
   hashtags: string[]
+  platform: 'tiktok' | 'instagram' | 'youtube'
+  stats: {
+    views: number | null
+    likes: number | null
+    comments: number | null
+    shares: number | null
+  }
 }
 
 // Constants
@@ -75,12 +82,32 @@ const loadingEl = document.getElementById('loading') as HTMLDivElement
 const loadingStatusEl = document.getElementById('loadingStatus') as HTMLParagraphElement
 const fetchBtn = document.getElementById('fetchBtn') as HTMLButtonElement
 const includeDetailsCheckbox = document.getElementById('includeDetailsCheckbox') as HTMLInputElement
+const includeStatsCheckbox = document.getElementById('includeStatsCheckbox') as HTMLInputElement
+
+// Auto-scroll elements
+const autoScrollBtn = document.getElementById('autoScrollBtn') as HTMLButtonElement
+const autoScrollContainerEl = document.getElementById('autoScrollContainer') as HTMLDivElement
+const stopAutoScrollBtn = document.getElementById('stopAutoScroll') as HTMLButtonElement
+const autoScrollStatusEl = document.getElementById('autoScrollStatus') as HTMLSpanElement
+const autoScrollCountEl = document.getElementById('autoScrollCount') as HTMLSpanElement
+const transcriptListEl = document.getElementById('transcriptList') as HTMLDivElement
+const copyAllBtn = document.getElementById('copyAllBtn') as HTMLButtonElement
+const downloadBtn = document.getElementById('downloadBtn') as HTMLButtonElement
 
 let currentUrl: string | null = null
 let currentTranscript: string | null = null
 let currentPlatform: Platform = null
 let abortController: AbortController | null = null
 let currentFetchId = 0  // Used to detect stale fetches
+
+// Auto-scroll state
+let isAutoScrolling = false
+let autoScrollAbortController: AbortController | null = null
+const collectedTranscripts: Array<{
+  platform: string
+  transcript: string
+  metadata: VideoMetadataResponse | null
+}> = []
 
 /**
  * Send a message to a content script with a timeout.
@@ -178,7 +205,10 @@ async function copyTranscript() {
   if (!currentTranscript) return
 
   // Disable button and show loading state if fetching metadata
-  const needsMetadata = includeDetailsCheckbox.checked && currentPlatform
+  const includeDetails = includeDetailsCheckbox.checked
+  const includeStats = includeStatsCheckbox.checked
+  const needsMetadata = (includeDetails || includeStats) && currentPlatform
+
   if (needsMetadata) {
     copyBtn.textContent = 'Loading...'
     copyBtn.disabled = true
@@ -187,13 +217,13 @@ async function copyTranscript() {
   try {
     let textToCopy = currentTranscript
 
-    // If "include video details" is checked, try to fetch and prepend metadata
+    // If any checkbox is checked, try to fetch and prepend metadata
     if (needsMetadata) {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
       if (tab?.id) {
         const metadata = await fetchVideoMetadata(tab.id, currentPlatform)
         if (metadata) {
-          textToCopy = formatWithMetadata(currentTranscript, metadata)
+          textToCopy = formatWithMetadata(currentTranscript, metadata, { includeDetails, includeStats })
         }
       }
     }
@@ -330,30 +360,81 @@ async function fetchVideoMetadata(
     return response
   }
 
-  // YouTube metadata not implemented yet via content script
+  if (platform === 'youtube') {
+    const response = await tryContentScriptMessage<VideoMetadataResponse>(
+      tabId,
+      'youtube-metadata',
+      'content-scripts/youtube.js'
+    )
+    return response
+  }
+
   return null
+}
+
+/**
+ * Format a number for display (e.g., 1234567 -> "1.2M")
+ */
+function formatNumber(num: number | null): string | null {
+  if (num === null) return null
+  if (num >= 1000000000) return (num / 1000000000).toFixed(1).replace(/\.0$/, '') + 'B'
+  if (num >= 1000000) return (num / 1000000).toFixed(1).replace(/\.0$/, '') + 'M'
+  if (num >= 1000) return (num / 1000).toFixed(1).replace(/\.0$/, '') + 'K'
+  return num.toString()
 }
 
 /**
  * Format metadata and transcript for copying.
  */
-function formatWithMetadata(transcript: string, metadata: VideoMetadataResponse): string {
+function formatWithMetadata(
+  transcript: string,
+  metadata: VideoMetadataResponse,
+  options: { includeDetails: boolean; includeStats: boolean } = { includeDetails: true, includeStats: false }
+): string {
   const parts: string[] = []
 
-  if (metadata.title) {
-    parts.push(`Title: ${metadata.title}`)
+  // Platform label
+  const platformName = metadata.platform === 'tiktok' ? 'TikTok'
+    : metadata.platform === 'instagram' ? 'Instagram'
+    : metadata.platform === 'youtube' ? 'YouTube'
+    : 'Unknown'
+  parts.push(`Platform: ${platformName}`)
+
+  if (options.includeDetails) {
+    if (metadata.title) {
+      parts.push(`Title: ${metadata.title}`)
+    }
+    if (metadata.creator) {
+      parts.push(`Creator: ${metadata.creator}`)
+    }
+    if (metadata.postedAt) {
+      parts.push(`Posted: ${metadata.postedAt}`)
+    }
+    if (metadata.hashtags && metadata.hashtags.length > 0) {
+      parts.push(`Hashtags: ${metadata.hashtags.join(' ')}`)
+    }
+    if (metadata.description && metadata.description !== metadata.title) {
+      parts.push(`Description: ${metadata.description}`)
+    }
   }
-  if (metadata.creator) {
-    parts.push(`Creator: ${metadata.creator}`)
-  }
-  if (metadata.postedAt) {
-    parts.push(`Posted: ${metadata.postedAt}`)
-  }
-  if (metadata.hashtags && metadata.hashtags.length > 0) {
-    parts.push(`Hashtags: ${metadata.hashtags.join(' ')}`)
-  }
-  if (metadata.description && metadata.description !== metadata.title) {
-    parts.push(`Description: ${metadata.description}`)
+
+  if (options.includeStats && metadata.stats) {
+    const statParts: string[] = []
+    if (metadata.stats.views !== null) {
+      statParts.push(`${formatNumber(metadata.stats.views)} views`)
+    }
+    if (metadata.stats.likes !== null) {
+      statParts.push(`${formatNumber(metadata.stats.likes)} likes`)
+    }
+    if (metadata.stats.comments !== null) {
+      statParts.push(`${formatNumber(metadata.stats.comments)} comments`)
+    }
+    if (metadata.stats.shares !== null) {
+      statParts.push(`${formatNumber(metadata.stats.shares)} shares`)
+    }
+    if (statParts.length > 0) {
+      parts.push(`Stats: ${statParts.join(' | ')}`)
+    }
   }
 
   if (parts.length > 0) {
@@ -571,10 +652,19 @@ openOptionsBtn.addEventListener('click', () => {
   chrome.runtime.openOptionsPage()
 })
 
-// Persist checkbox setting
+// Persist checkbox settings
 includeDetailsCheckbox.addEventListener('change', () => {
   patchSettings({ includeVideoDetails: includeDetailsCheckbox.checked })
 })
+includeStatsCheckbox.addEventListener('change', () => {
+  patchSettings({ includeVideoStats: includeStatsCheckbox.checked })
+})
+
+// Auto-scroll event listeners
+autoScrollBtn?.addEventListener('click', startAutoScroll)
+stopAutoScrollBtn?.addEventListener('click', stopAutoScroll)
+copyAllBtn?.addEventListener('click', copyAllTranscripts)
+downloadBtn?.addEventListener('click', downloadTranscripts)
 
 // Listen for tab changes
 chrome.tabs.onActivated.addListener(() => {
@@ -591,6 +681,240 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 async function initCheckboxState() {
   const settings = await loadSettings()
   includeDetailsCheckbox.checked = settings.includeVideoDetails
+  includeStatsCheckbox.checked = settings.includeVideoStats
+}
+
+/**
+ * Scroll to the next video in feed via content script.
+ */
+async function scrollToNextVideo(tabId: number, platform: Platform): Promise<boolean> {
+  if (!platform) return false
+
+  try {
+    // Send message to content script to scroll to next video
+    const response = await chrome.tabs.sendMessage(tabId, {
+      type: `${platform}-scroll-next`,
+    }) as { ok: boolean } | undefined
+
+    return response?.ok ?? false
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Start auto-scroll mode to collect transcripts.
+ */
+async function startAutoScroll() {
+  if (isAutoScrolling) return
+
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+  const url = tab?.url || ''
+  const platform = detectPlatform(url)
+
+  if (!platform || !tab?.id) {
+    showError('Auto-scroll is only supported on YouTube Shorts, TikTok, and Instagram Reels')
+    return
+  }
+
+  isAutoScrolling = true
+  autoScrollAbortController = new AbortController()
+  collectedTranscripts.length = 0
+
+  // Update UI
+  hideAll()
+  autoScrollContainerEl?.classList.remove('hidden')
+  autoScrollBtn.disabled = true
+  fetchBtn.disabled = true
+  updateAutoScrollUI()
+
+  const tabId = tab.id
+
+  // Auto-scroll loop
+  while (isAutoScrolling) {
+    try {
+      autoScrollStatusEl.textContent = 'Extracting transcript...'
+
+      // Get transcript for current video
+      const transcriptResult = await getTranscriptForCurrentVideo(tabId, platform)
+
+      if (transcriptResult && isAutoScrolling) {
+        // Get metadata
+        const metadata = await fetchVideoMetadata(tabId, platform)
+
+        collectedTranscripts.push({
+          platform: platform,
+          transcript: transcriptResult.text,
+          metadata,
+        })
+
+        updateAutoScrollUI()
+        addTranscriptToList(transcriptResult.text, metadata)
+      }
+
+      if (!isAutoScrolling) break
+
+      // Scroll to next video
+      autoScrollStatusEl.textContent = 'Scrolling to next video...'
+      const scrolled = await scrollToNextVideo(tabId, platform)
+
+      if (!scrolled) {
+        autoScrollStatusEl.textContent = 'Reached end of feed or scroll failed'
+        await new Promise(resolve => setTimeout(resolve, 2000))
+        stopAutoScroll()
+        break
+      }
+
+      // Wait for video to load
+      await new Promise(resolve => setTimeout(resolve, 2500))
+
+    } catch (err) {
+      console.error('[AutoScroll] Error:', err)
+      autoScrollStatusEl.textContent = 'Error: ' + (err instanceof Error ? err.message : 'Unknown')
+      await new Promise(resolve => setTimeout(resolve, 2000))
+    }
+  }
+}
+
+/**
+ * Stop auto-scroll mode.
+ */
+function stopAutoScroll() {
+  isAutoScrolling = false
+  autoScrollAbortController?.abort()
+  autoScrollAbortController = null
+
+  autoScrollStatusEl.textContent = `Stopped. Collected ${collectedTranscripts.length} transcripts.`
+  autoScrollBtn.disabled = false
+  fetchBtn.disabled = false
+}
+
+/**
+ * Update auto-scroll UI with current count.
+ */
+function updateAutoScrollUI() {
+  const count = collectedTranscripts.length
+  autoScrollCountEl.textContent = `${count} video${count !== 1 ? 's' : ''}`
+}
+
+/**
+ * Add a transcript item to the list UI.
+ */
+function addTranscriptToList(text: string, metadata: VideoMetadataResponse | null) {
+  const item = document.createElement('div')
+  item.className = 'transcript-item'
+
+  const header = document.createElement('div')
+  header.className = 'transcript-item-header'
+
+  const platformLabel = document.createElement('span')
+  platformLabel.className = 'transcript-item-platform'
+  platformLabel.textContent = metadata?.platform || 'Unknown'
+  header.appendChild(platformLabel)
+
+  if (metadata?.stats) {
+    const statsLabel = document.createElement('span')
+    statsLabel.className = 'transcript-item-stats'
+    const statParts: string[] = []
+    if (metadata.stats.views !== null) statParts.push(`${formatNumber(metadata.stats.views)} views`)
+    if (metadata.stats.likes !== null) statParts.push(`${formatNumber(metadata.stats.likes)} likes`)
+    statsLabel.textContent = statParts.join(' · ')
+    header.appendChild(statsLabel)
+  }
+
+  item.appendChild(header)
+
+  const content = document.createElement('div')
+  content.className = 'transcript-item-content'
+  content.textContent = text.slice(0, 500) + (text.length > 500 ? '...' : '')
+  item.appendChild(content)
+
+  transcriptListEl?.appendChild(item)
+  transcriptListEl?.scrollTo(0, transcriptListEl.scrollHeight)
+}
+
+/**
+ * Get transcript for the current video without full fetch flow.
+ */
+async function getTranscriptForCurrentVideo(
+  tabId: number,
+  platform: Platform
+): Promise<{ text: string; source: string } | null> {
+  // Try content script extraction first
+  const contentResult = await tryContentScriptExtraction(tabId, platform)
+
+  if (contentResult && 'text' in contentResult) {
+    return { text: contentResult.text, source: contentResult.source }
+  }
+
+  // For videos without native captions, we'd need to call the daemon
+  // For now, return null to skip videos without captions in auto-scroll mode
+  return null
+}
+
+/**
+ * Copy all collected transcripts to clipboard.
+ */
+async function copyAllTranscripts() {
+  if (collectedTranscripts.length === 0) return
+
+  const includeDetails = includeDetailsCheckbox.checked
+  const includeStats = includeStatsCheckbox.checked
+
+  const allText = collectedTranscripts.map((item, index) => {
+    let text = `--- Video ${index + 1} ---\n\n`
+    if (item.metadata) {
+      text += formatWithMetadata(item.transcript, item.metadata, { includeDetails, includeStats })
+    } else {
+      text += item.transcript
+    }
+    return text
+  }).join('\n\n')
+
+  try {
+    await navigator.clipboard.writeText(allText)
+    copyAllBtn.textContent = 'Copied!'
+    copyAllBtn.classList.add('copied')
+    setTimeout(() => {
+      copyAllBtn.textContent = 'Copy All'
+      copyAllBtn.classList.remove('copied')
+    }, 2000)
+  } catch {
+    copyAllBtn.textContent = 'Failed'
+    setTimeout(() => {
+      copyAllBtn.textContent = 'Copy All'
+    }, 2000)
+  }
+}
+
+/**
+ * Download all collected transcripts as a .txt file.
+ */
+function downloadTranscripts() {
+  if (collectedTranscripts.length === 0) return
+
+  const includeDetails = includeDetailsCheckbox.checked
+  const includeStats = includeStatsCheckbox.checked
+
+  const allText = collectedTranscripts.map((item, index) => {
+    let text = `--- Video ${index + 1} ---\n\n`
+    if (item.metadata) {
+      text += formatWithMetadata(item.transcript, item.metadata, { includeDetails, includeStats })
+    } else {
+      text += item.transcript
+    }
+    return text
+  }).join('\n\n')
+
+  const blob = new Blob([allText], { type: 'text/plain' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `transcripts-${new Date().toISOString().split('T')[0]}.txt`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
 }
 
 // Initial setup

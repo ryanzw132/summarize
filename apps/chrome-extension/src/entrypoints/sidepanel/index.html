@@ -47,6 +47,10 @@
               <input type="checkbox" id="includeDetailsCheckbox" />
               <span>Include video details</span>
             </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="includeStatsCheckbox" />
+              <span>Include video stats</span>
+            </label>
             <button id="copyBtn" type="button" class="btn btn-copy">Copy</button>
           </div>
         </div>
@@ -57,10 +61,29 @@
         <div class="spinner"></div>
         <p id="loadingStatus">Fetching transcript...</p>
       </div>
+
+      <div id="autoScrollContainer" class="auto-scroll-container hidden">
+        <div class="auto-scroll-header">
+          <h2>Auto-Scroll Mode</h2>
+          <div class="auto-scroll-controls">
+            <button id="stopAutoScroll" type="button" class="btn btn-stop">Stop</button>
+          </div>
+        </div>
+        <div class="auto-scroll-status">
+          <span id="autoScrollStatus">Collecting transcripts...</span>
+          <span id="autoScrollCount">0 videos</span>
+        </div>
+        <div id="transcriptList" class="transcript-list"></div>
+        <div class="auto-scroll-actions">
+          <button id="copyAllBtn" type="button" class="btn btn-copy">Copy All</button>
+          <button id="downloadBtn" type="button" class="btn btn-download">Download .txt</button>
+        </div>
+      </div>
     </main>
 
     <footer>
       <button id="fetchBtn" type="button" class="btn btn-primary">Get Transcript</button>
+      <button id="autoScrollBtn" type="button" class="btn btn-secondary">Auto-Scroll</button>
     </footer>
 
     <script type="module" src="./transcript-main.ts"></script>

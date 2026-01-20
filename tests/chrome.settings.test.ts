@@ -92,4 +92,42 @@ describe('chrome/settings', () => {
     expect(loaded.retries).toBe(3)
     expect(loaded.maxOutputTokens).toBe('2k')
   })
+
+  it('persists includeVideoDetails setting', async () => {
+    await patchSettings({ includeVideoDetails: true })
+    const loaded = await loadSettings()
+    expect(loaded.includeVideoDetails).toBe(true)
+
+    await patchSettings({ includeVideoDetails: false })
+    const loaded2 = await loadSettings()
+    expect(loaded2.includeVideoDetails).toBe(false)
+  })
+
+  it('persists includeVideoStats setting', async () => {
+    await patchSettings({ includeVideoStats: true })
+    const loaded = await loadSettings()
+    expect(loaded.includeVideoStats).toBe(true)
+
+    await patchSettings({ includeVideoStats: false })
+    const loaded2 = await loadSettings()
+    expect(loaded2.includeVideoStats).toBe(false)
+  })
+
+  it('defaults includeVideoStats to false', async () => {
+    const loaded = await loadSettings()
+    expect(loaded.includeVideoStats).toBe(false)
+  })
+
+  it('handles invalid includeVideoStats values', async () => {
+    storage.settings = { includeVideoStats: 'invalid' }
+    const loaded = await loadSettings()
+    expect(loaded.includeVideoStats).toBe(false)
+  })
+
+  it('handles both video detail settings together', async () => {
+    await patchSettings({ includeVideoDetails: true, includeVideoStats: true })
+    const loaded = await loadSettings()
+    expect(loaded.includeVideoDetails).toBe(true)
+    expect(loaded.includeVideoStats).toBe(true)
+  })
 })
