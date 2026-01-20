@@ -42,6 +42,7 @@ type VideoMetadataResponse = {
   description: string | null
   creator: string | null
   postedAt: string | null
+  hashtags: string[]
 }
 
 // Constants
@@ -347,6 +348,9 @@ function formatWithMetadata(transcript: string, metadata: VideoMetadataResponse)
   }
   if (metadata.postedAt) {
     parts.push(`Posted: ${metadata.postedAt}`)
+  }
+  if (metadata.hashtags && metadata.hashtags.length > 0) {
+    parts.push(`Hashtags: ${metadata.hashtags.join(' ')}`)
   }
   if (metadata.description && metadata.description !== metadata.title) {
     parts.push(`Description: ${metadata.description}`)

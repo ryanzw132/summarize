@@ -30,6 +30,7 @@ type TikTokMetadataResponse = {
   description: string | null
   creator: string | null
   postedAt: string | null
+  hashtags: string[]
 }
 
 /**
@@ -118,12 +119,25 @@ function extractTikTokDurationSeconds(): number | null {
 }
 
 /**
+ * Extract hashtags from a text string.
+ */
+function extractHashtags(text: string | null): string[] {
+  if (!text) return []
+  // Match hashtags: # followed by word characters (letters, numbers, underscores)
+  // Also supports non-ASCII characters for international hashtags
+  const matches = text.match(/#[\w\u0080-\uFFFF]+/g)
+  if (!matches) return []
+  // Remove duplicates and return
+  return [...new Set(matches)]
+}
+
+/**
  * Extract video metadata from TikTok's hydration data.
  */
 function extractTikTokMetadata(): TikTokMetadataResponse {
   const scriptEl = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__')
   if (!scriptEl?.textContent) {
-    return { title: null, description: null, creator: null, postedAt: null }
+    return { title: null, description: null, creator: null, postedAt: null, hashtags: [] }
   }
 
   try {
@@ -148,12 +162,15 @@ function extractTikTokMetadata(): TikTokMetadataResponse {
       data?.__DEFAULT_SCOPE__?.['webapp.video-detail']?.itemInfo?.itemStruct
 
     if (!itemStruct) {
-      return { title: null, description: null, creator: null, postedAt: null }
+      return { title: null, description: null, creator: null, postedAt: null, hashtags: [] }
     }
 
     // Title and description are the same on TikTok (the video caption)
     const description = itemStruct.desc?.trim() || null
     const title = description
+
+    // Extract hashtags from the description/caption
+    const hashtags = extractHashtags(description)
 
     // Creator: prefer uniqueId (username), fall back to nickname
     const creator = itemStruct.author?.uniqueId
@@ -175,9 +192,9 @@ function extractTikTokMetadata(): TikTokMetadataResponse {
       }
     }
 
-    return { title, description, creator, postedAt }
+    return { title, description, creator, postedAt, hashtags }
   } catch {
-    return { title: null, description: null, creator: null, postedAt: null }
+    return { title: null, description: null, creator: null, postedAt: null, hashtags: [] }
   }
 }
 

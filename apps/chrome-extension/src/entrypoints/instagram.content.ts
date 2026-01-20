@@ -17,6 +17,7 @@ type InstagramMetadataResponse = {
   description: string | null
   creator: string | null
   postedAt: string | null
+  hashtags: string[]
 }
 
 // Maximum blob size to convert to data URL (50MB)
@@ -98,6 +99,19 @@ function extractInstagramVideoInfo(): {
 }
 
 /**
+ * Extract hashtags from a text string.
+ */
+function extractHashtags(text: string | null): string[] {
+  if (!text) return []
+  // Match hashtags: # followed by word characters (letters, numbers, underscores)
+  // Also supports non-ASCII characters for international hashtags
+  const matches = text.match(/#[\w\u0080-\uFFFF]+/g)
+  if (!matches) return []
+  // Remove duplicates and return
+  return [...new Set(matches)]
+}
+
+/**
  * Extract video metadata from Instagram page.
  */
 function extractInstagramMetadata(): InstagramMetadataResponse {
@@ -108,6 +122,11 @@ function extractInstagramMetadata(): InstagramMetadataResponse {
   // Get description from og:description
   const ogDescription = document.querySelector('meta[property="og:description"]')?.getAttribute('content')
   const description = ogDescription || null
+
+  // Extract hashtags from title and description
+  const titleHashtags = extractHashtags(ogTitle)
+  const descHashtags = extractHashtags(ogDescription)
+  const hashtags = [...new Set([...titleHashtags, ...descHashtags])]
 
   // Try to extract creator from page
   // Instagram URLs can be:
@@ -176,7 +195,7 @@ function extractInstagramMetadata(): InstagramMetadataResponse {
     }
   }
 
-  return { title, description, creator, postedAt }
+  return { title, description, creator, postedAt, hashtags }
 }
 
 /**
