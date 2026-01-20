@@ -226,7 +226,7 @@ function shouldShowButton(): boolean {
   // YouTube Shorts
   if (/youtube\.com\/shorts\//.test(url)) return true
 
-  // TikTok videos
+  // TikTok videos - multiple URL patterns
   // Standard video URLs: tiktok.com/@username/video/id
   if (/tiktok\.com\/@[^/]+\/video\//.test(url)) return true
   // Short links: vm.tiktok.com/id (always redirect to videos)
@@ -234,9 +234,31 @@ function shouldShowButton(): boolean {
   // Mobile video URLs: m.tiktok.com/v/id or m.tiktok.com/@user/video/id
   if (/m\.tiktok\.com\/v\//.test(url)) return true
   if (/m\.tiktok\.com\/@[^/]+\/video\//.test(url)) return true
+  // TikTok FYP and Explore pages - check if a video is actually playing
+  if (/tiktok\.com\/(foryou|explore|discover|following)?(\?|$)/i.test(url)) {
+    // Only show button if there's a video element on the page
+    const hasVideo = document.querySelector('video') !== null
+    return hasVideo
+  }
+  // TikTok search results with videos
+  if (/tiktok\.com\/search/.test(url)) {
+    const hasVideo = document.querySelector('video') !== null
+    return hasVideo
+  }
+  // TikTok profile pages viewing a video (modal overlay)
+  if (/tiktok\.com\/@[^/]+\/?(\?|$)/.test(url)) {
+    // Check if video modal is open
+    const hasVideoModal = document.querySelector('video') !== null
+    return hasVideoModal
+  }
 
   // Instagram Reels and posts
   if (/instagram\.com\/(?:reel|reels|p|tv)\//.test(url)) return true
+  // Instagram Explore/Feed with video modal open
+  if (/instagram\.com\/(explore|reels)?\/?(\?|$)/i.test(url)) {
+    const hasVideo = document.querySelector('video') !== null
+    return hasVideo
+  }
 
   return false
 }
@@ -262,22 +284,28 @@ export default defineContentScript({
     if ((globalThis as unknown as Record<string, unknown>)[flag]) return
     ;(globalThis as unknown as Record<string, unknown>)[flag] = true
 
-    // Initial check
-    checkAndUpdateButton()
+    // Initial check (with small delay for page to load video elements)
+    setTimeout(checkAndUpdateButton, 500)
 
     // Watch for URL changes (SPA navigation)
     let lastUrl = window.location.href
+    let lastVideoCount = document.querySelectorAll('video').length
 
     // Use a debounced check to avoid excessive calls
     let debounceTimer: ReturnType<typeof setTimeout> | null = null
     const debouncedCheck = () => {
       if (debounceTimer) clearTimeout(debounceTimer)
       debounceTimer = setTimeout(() => {
-        if (window.location.href !== lastUrl) {
-          lastUrl = window.location.href
+        const currentUrl = window.location.href
+        const currentVideoCount = document.querySelectorAll('video').length
+
+        // Check on URL change OR video element change
+        if (currentUrl !== lastUrl || currentVideoCount !== lastVideoCount) {
+          lastUrl = currentUrl
+          lastVideoCount = currentVideoCount
           checkAndUpdateButton()
         }
-      }, 100)
+      }, 150)
     }
 
     // Only observe if document.body exists
@@ -294,5 +322,15 @@ export default defineContentScript({
 
     // Listen for YouTube's custom navigation event
     window.addEventListener('yt-navigate-finish', checkAndUpdateButton)
+
+    // Fallback: periodic check for TikTok/Instagram SPA navigation
+    // These apps may change content without changing URL
+    setInterval(() => {
+      const currentVideoCount = document.querySelectorAll('video').length
+      if (currentVideoCount !== lastVideoCount) {
+        lastVideoCount = currentVideoCount
+        checkAndUpdateButton()
+      }
+    }, 1000)
   },
 })

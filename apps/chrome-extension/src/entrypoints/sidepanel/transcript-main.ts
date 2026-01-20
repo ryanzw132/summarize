@@ -54,7 +54,61 @@ type VideoMetadataResponse = {
 
 // Constants
 const CONTENT_SCRIPT_TIMEOUT_MS = 10000  // 10 seconds
+const DAEMON_REQUEST_TIMEOUT_MS = 60000  // 60 seconds for daemon (includes Whisper transcription)
 const MAX_BLOB_SIZE_BYTES = 50 * 1024 * 1024  // 50MB max for data URL encoding
+
+// Error codes for debugging
+type ErrorCode =
+  | 'ERR_NO_URL'
+  | 'ERR_UNSUPPORTED_PLATFORM'
+  | 'ERR_NO_TAB'
+  | 'ERR_NO_TOKEN'
+  | 'ERR_CONTENT_SCRIPT_TIMEOUT'
+  | 'ERR_CONTENT_SCRIPT_FAILED'
+  | 'ERR_NO_CAPTIONS'
+  | 'ERR_DAEMON_UNREACHABLE'
+  | 'ERR_DAEMON_TIMEOUT'
+  | 'ERR_DAEMON_ERROR'
+  | 'ERR_NO_TRANSCRIPT'
+  | 'ERR_PARSE_FAILED'
+  | 'ERR_SAFETY_TIMEOUT'
+  | 'ERR_UNKNOWN'
+
+interface DiagnosticInfo {
+  code: ErrorCode
+  message: string
+  url: string | null
+  platform: Platform
+  timestamp: string
+  details?: string
+}
+
+let lastDiagnostic: DiagnosticInfo | null = null
+
+function createDiagnostic(code: ErrorCode, message: string, details?: string): DiagnosticInfo {
+  const diagnostic: DiagnosticInfo = {
+    code,
+    message,
+    url: currentUrl,
+    platform: detectPlatform(currentUrl || ''),
+    timestamp: new Date().toISOString(),
+    details,
+  }
+  lastDiagnostic = diagnostic
+  console.error('[Transcript]', code, message, details || '')
+  return diagnostic
+}
+
+function formatDiagnosticForCopy(d: DiagnosticInfo): string {
+  return `ERROR REPORT
+============
+Code: ${d.code}
+Time: ${d.timestamp}
+Platform: ${d.platform || 'unknown'}
+URL: ${d.url || 'none'}
+Message: ${d.message}
+${d.details ? `Details: ${d.details}` : ''}`
+}
 
 function detectPlatform(url: string): Platform {
   if (YOUTUBE_PATTERN.test(url)) return 'youtube'
@@ -110,6 +164,33 @@ const collectedTranscripts: Array<{
 }> = []
 
 /**
+ * Wrap a fetch request with a timeout.
+ */
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit,
+  timeoutMs: number
+): Promise<Response> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    })
+    clearTimeout(timeoutId)
+    return response
+  } catch (err) {
+    clearTimeout(timeoutId)
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error('Request timed out')
+    }
+    throw err
+  }
+}
+
+/**
  * Send a message to a content script with a timeout.
  */
 async function sendMessageWithTimeout<T>(
@@ -151,9 +232,37 @@ function showSetup() {
   fetchBtn.disabled = true
 }
 
-function showError(message: string) {
+function showError(message: string, code?: ErrorCode, details?: string) {
   hideAll()
+  const diagnostic = code ? createDiagnostic(code, message, details) : createDiagnostic('ERR_UNKNOWN', message, details)
+
+  // Show user-friendly message
   errorMessageEl.textContent = message
+
+  // Add copy button for error report
+  const existingCopyBtn = errorEl.querySelector('.copy-error-btn')
+  if (existingCopyBtn) {
+    existingCopyBtn.remove()
+  }
+
+  const copyErrorBtn = document.createElement('button')
+  copyErrorBtn.className = 'btn copy-error-btn'
+  copyErrorBtn.textContent = 'Copy Error Report'
+  copyErrorBtn.style.marginTop = '8px'
+  copyErrorBtn.style.fontSize = '12px'
+  copyErrorBtn.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(formatDiagnosticForCopy(diagnostic))
+      copyErrorBtn.textContent = 'Copied!'
+      setTimeout(() => { copyErrorBtn.textContent = 'Copy Error Report' }, 2000)
+    } catch {
+      copyErrorBtn.textContent = 'Copy failed'
+    }
+  }
+
+  // Insert after error message
+  errorMessageEl.parentNode?.insertBefore(copyErrorBtn, errorMessageEl.nextSibling)
+
   errorEl.classList.remove('hidden')
   fetchBtn.disabled = false
 }
@@ -297,28 +406,37 @@ async function tryContentScriptExtraction(
   platform: Platform
 ): Promise<{ text: string; source: string } | { videoUrl: string; source: string } | null> {
   if (platform === 'tiktok') {
+    console.log('[Transcript] Sending tiktok-transcript message to content script...')
     const response = await tryContentScriptMessage<TikTokTranscriptResponse>(
       tabId,
       'tiktok-transcript',
       'content-scripts/tiktok.js'
     )
 
-    if (response?.ok && response.text) {
+    if (response === null) {
+      console.log('[Transcript] TikTok content script did not respond (timeout or not injected)')
+      createDiagnostic('ERR_CONTENT_SCRIPT_TIMEOUT', 'TikTok content script did not respond', `tabId: ${tabId}`)
+    } else if (response.ok && response.text) {
+      console.log('[Transcript] TikTok captions extracted successfully, length:', response.text.length)
       return { text: response.text, source: 'tiktok-captions' }
-    }
-    if (response && !response.ok) {
+    } else if (!response.ok) {
       console.log('[Transcript] TikTok content script:', response.reason, '-', response.error)
+      createDiagnostic('ERR_NO_CAPTIONS', `TikTok: ${response.reason}`, response.error)
     }
   }
 
   if (platform === 'instagram') {
+    console.log('[Transcript] Sending instagram-transcript message to content script...')
     const response = await tryContentScriptMessage<InstagramTranscriptResponse>(
       tabId,
       'instagram-transcript',
       'content-scripts/instagram.js'
     )
 
-    if (response?.ok && response.videoUrl) {
+    if (response === null) {
+      console.log('[Transcript] Instagram content script did not respond (timeout or not injected)')
+      createDiagnostic('ERR_CONTENT_SCRIPT_TIMEOUT', 'Instagram content script did not respond', `tabId: ${tabId}`)
+    } else if (response.ok && response.videoUrl) {
       const videoUrl = response.videoUrl
       // Only accept proper HTTPS CDN URLs (not blob: or data:)
       if (videoUrl.startsWith('https://')) {
@@ -326,9 +444,10 @@ async function tryContentScriptExtraction(
         return { videoUrl, source: 'instagram-video' }
       }
       console.log('[Transcript] Instagram video URL is not usable:', videoUrl.slice(0, 50))
-    }
-    if (response && !response.ok) {
+      createDiagnostic('ERR_CONTENT_SCRIPT_FAILED', 'Instagram video URL not usable', `URL type: ${videoUrl.slice(0, 10)}...`)
+    } else if (!response.ok) {
       console.log('[Transcript] Instagram content script:', response.reason, '-', response.error)
+      createDiagnostic('ERR_NO_CAPTIONS', `Instagram: ${response.reason}`, response.error)
     }
   }
 
@@ -445,7 +564,10 @@ function formatWithMetadata(
 }
 
 async function fetchTranscript() {
-  if (!currentUrl) return
+  if (!currentUrl) {
+    showError('No URL detected. Please refresh the page.', 'ERR_NO_URL')
+    return
+  }
 
   const platform = detectPlatform(currentUrl)
   if (!platform) {
@@ -461,6 +583,17 @@ async function fetchTranscript() {
 
   abortController?.abort()
   abortController = new AbortController()
+
+  // Safety timeout - if nothing happens for 90 seconds, show error
+  const safetyTimeoutId = setTimeout(() => {
+    if (!isStale()) {
+      showError(
+        'Request timed out after 90 seconds. Please try again.',
+        'ERR_SAFETY_TIMEOUT',
+        'No response received from content script or daemon within 90 seconds'
+      )
+    }
+  }, 90000)
 
   try {
     const settings = await loadSettings()
@@ -482,10 +615,14 @@ async function fetchTranscript() {
       const contentResult = await tryContentScriptExtraction(tabId, platform)
 
       // Check for stale fetch after async operation
-      if (isStale()) return
+      if (isStale()) {
+        clearTimeout(safetyTimeoutId)
+        return
+      }
 
       if (contentResult && 'text' in contentResult) {
         // Got transcript text directly (TikTok captions)
+        clearTimeout(safetyTimeoutId)
         setProgress(100)
         setStatus('Done')
         showTranscript(contentResult.text, platform, contentResult.source)
@@ -505,6 +642,7 @@ async function fetchTranscript() {
 
     // Check token before making daemon request
     if (!token) {
+      clearTimeout(safetyTimeoutId)
       showSetup()
       return
     }
@@ -521,29 +659,36 @@ async function fetchTranscript() {
     // This allows the daemon to transcribe the video directly without needing auth
     const urlToFetch = extractedVideoUrl || currentUrl
 
-    // Make request to daemon
-    const response = await fetch('http://127.0.0.1:8787/v1/summarize', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
+    // Make request to daemon with timeout
+    const response = await fetchWithTimeout(
+      'http://127.0.0.1:8787/v1/summarize',
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          url: urlToFetch,
+          title,
+          mode: 'url',
+          extractOnly: true,
+          timestamps: true,
+          maxCharacters: null,
+          // When we have a direct video URL (from Instagram content script),
+          // enable transcript mode to force media transcription via yt-dlp/whisper
+          ...(extractedVideoUrl ? { videoMode: 'transcript' } : {}),
+        }),
+        signal: abortController.signal,
       },
-      body: JSON.stringify({
-        url: urlToFetch,
-        title,
-        mode: 'url',
-        extractOnly: true,
-        timestamps: true,
-        maxCharacters: null,
-        // When we have a direct video URL (from Instagram content script),
-        // enable transcript mode to force media transcription via yt-dlp/whisper
-        ...(extractedVideoUrl ? { videoMode: 'transcript' } : {}),
-      }),
-      signal: abortController.signal,
-    })
+      DAEMON_REQUEST_TIMEOUT_MS
+    )
 
     // Check for stale fetch after daemon request
-    if (isStale()) return
+    if (isStale()) {
+      clearTimeout(safetyTimeoutId)
+      return
+    }
 
     setProgress(60)
     setStatus('Processing...')
@@ -563,7 +708,10 @@ async function fetchTranscript() {
     }
 
     // Check for stale fetch after parsing response
-    if (isStale()) return
+    if (isStale()) {
+      clearTimeout(safetyTimeoutId)
+      return
+    }
 
     if (!data.ok) {
       throw new Error(data.error || 'Failed to fetch transcript')
@@ -588,21 +736,46 @@ async function fetchTranscript() {
       throw new Error('No transcript available for this video')
     }
 
+    clearTimeout(safetyTimeoutId)
     setStatus('Done')
     showTranscript(transcriptText.trim(), platform, 'extracted')
 
   } catch (err) {
+    clearTimeout(safetyTimeoutId)
+
     // Ignore errors from aborted or stale fetches
     if ((err as Error).name === 'AbortError') return
     if (isStale()) return
 
     const message = err instanceof Error ? err.message : 'Unknown error'
+    const stack = err instanceof Error ? err.stack : undefined
     setStatus('Error')
 
     if (message.includes('Failed to fetch') || message.includes('NetworkError')) {
-      showError('Cannot connect to daemon. Make sure it\'s running: summarize daemon status')
+      showError(
+        'Cannot connect to daemon. Make sure it\'s running:\nsummarize daemon start',
+        'ERR_DAEMON_UNREACHABLE',
+        `Original error: ${message}`
+      )
+    } else if (message.includes('timed out') || message.includes('timeout')) {
+      showError(
+        'Request timed out. The daemon may be busy or not running.',
+        'ERR_DAEMON_TIMEOUT',
+        `Timeout after ${DAEMON_REQUEST_TIMEOUT_MS}ms`
+      )
+    } else if (message.includes('No transcript available')) {
+      showError(
+        'No transcript available. This video may not have captions.',
+        'ERR_NO_TRANSCRIPT'
+      )
+    } else if (message.includes('HTTP 4') || message.includes('HTTP 5')) {
+      showError(
+        `Daemon error: ${message}`,
+        'ERR_DAEMON_ERROR',
+        stack
+      )
     } else {
-      showError(message)
+      showError(message, 'ERR_UNKNOWN', stack)
     }
   }
 }
