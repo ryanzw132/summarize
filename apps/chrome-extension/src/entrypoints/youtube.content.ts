@@ -136,7 +136,7 @@ function extractFromInitialData(): Partial<YouTubeMetadataResponse> {
   const scripts = document.querySelectorAll('script')
   for (const script of scripts) {
     const text = script.textContent || ''
-    const match = text.match(/var\s+ytInitialData\s*=\s*(\{.+?\});/)
+    const match = text.match(/var\s+ytInitialData\s*=\s*(\{[\s\S]+?\});/)
     if (match?.[1]) {
       try {
         const data = JSON.parse(match[1])

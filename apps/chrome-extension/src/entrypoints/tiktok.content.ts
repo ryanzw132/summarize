@@ -7,6 +7,25 @@ interface TikTokSubtitleInfo {
   format: string
 }
 
+type TikTokItemStruct = {
+  desc?: string
+  createTime?: number | string
+  author?: {
+    uniqueId?: string
+    nickname?: string
+  }
+  stats?: {
+    playCount?: number
+    diggCount?: number
+    commentCount?: number
+    shareCount?: number
+  }
+  video?: {
+    subtitleInfos?: unknown
+    duration?: number | string
+  }
+}
+
 interface TranscriptSegment {
   startMs: number
   endMs: number
@@ -46,85 +65,21 @@ type TikTokMetadataResponse = {
  * Extract subtitle info from TikTok's `__UNIVERSAL_DATA_FOR_REHYDRATION__` script tag.
  */
 function extractTikTokSubtitleInfos(): TikTokSubtitleInfo[] {
-  const scriptEl = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__')
-  if (!scriptEl?.textContent) {
-    return []
-  }
-
-  try {
-    const data = JSON.parse(scriptEl.textContent) as {
-      __DEFAULT_SCOPE__?: {
-        'webapp.video-detail'?: {
-          itemInfo?: {
-            itemStruct?: {
-              video?: {
-                subtitleInfos?: Array<{
-                  LanguageCodeName?: string
-                  LanguageID?: string
-                  Url?: string
-                  UrlExpire?: number
-                  Format?: string
-                }>
-              }
-            }
-          }
-        }
-      }
-    }
-
-    const subtitleInfos =
-      data?.__DEFAULT_SCOPE__?.['webapp.video-detail']?.itemInfo?.itemStruct?.video?.subtitleInfos
-
-    if (!Array.isArray(subtitleInfos) || subtitleInfos.length === 0) {
-      return []
-    }
-
-    return subtitleInfos
-      .filter((info) => info.Url && typeof info.Url === 'string')
-      .map((info) => ({
-        languageCode: info.LanguageCodeName ?? info.LanguageID ?? 'unknown',
-        url: info.Url as string,
-        urlExpire: typeof info.UrlExpire === 'number' ? info.UrlExpire : 0,
-        format: info.Format ?? 'webvtt',
-      }))
-  } catch {
-    return []
-  }
+  const itemStruct = extractTikTokItemStruct()
+  const subtitleInfos = itemStruct?.video?.subtitleInfos
+  return normalizeSubtitleInfos(subtitleInfos)
 }
 
 /**
  * Extract video duration from TikTok's hydration data (in seconds)
  */
 function extractTikTokDurationSeconds(): number | null {
-  const scriptEl = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__')
-  if (!scriptEl?.textContent) {
-    return null
-  }
-
-  try {
-    const data = JSON.parse(scriptEl.textContent) as {
-      __DEFAULT_SCOPE__?: {
-        'webapp.video-detail'?: {
-          itemInfo?: {
-            itemStruct?: {
-              video?: {
-                duration?: number
-              }
-            }
-          }
-        }
-      }
-    }
-
-    const duration =
-      data?.__DEFAULT_SCOPE__?.['webapp.video-detail']?.itemInfo?.itemStruct?.video?.duration
-
-    return typeof duration === 'number' && Number.isFinite(duration) && duration > 0
-      ? duration
-      : null
-  } catch {
-    return null
-  }
+  const itemStruct = extractTikTokItemStruct()
+  const durationRaw = itemStruct?.video?.duration
+  const duration = typeof durationRaw === 'string' ? Number.parseInt(durationRaw, 10) : durationRaw
+  return typeof duration === 'number' && Number.isFinite(duration) && duration > 0
+    ? duration
+    : null
 }
 
 /**
@@ -154,38 +109,8 @@ function extractTikTokMetadata(): TikTokMetadataResponse {
     stats: { views: null, likes: null, comments: null, shares: null },
   }
 
-  const scriptEl = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__')
-  if (!scriptEl?.textContent) {
-    return emptyResponse
-  }
-
   try {
-    const data = JSON.parse(scriptEl.textContent) as {
-      __DEFAULT_SCOPE__?: {
-        'webapp.video-detail'?: {
-          itemInfo?: {
-            itemStruct?: {
-              desc?: string
-              createTime?: number | string
-              author?: {
-                uniqueId?: string
-                nickname?: string
-              }
-              stats?: {
-                playCount?: number
-                diggCount?: number
-                commentCount?: number
-                shareCount?: number
-              }
-            }
-          }
-        }
-      }
-    }
-
-    const itemStruct =
-      data?.__DEFAULT_SCOPE__?.['webapp.video-detail']?.itemInfo?.itemStruct
-
+    const itemStruct = extractTikTokItemStruct()
     if (!itemStruct) {
       return emptyResponse
     }
@@ -234,6 +159,91 @@ function extractTikTokMetadata(): TikTokMetadataResponse {
   }
 }
 
+function normalizeSubtitleInfos(raw: unknown): TikTokSubtitleInfo[] {
+  if (!Array.isArray(raw) || raw.length === 0) return []
+  return raw
+    .map((info) => {
+      if (!info || typeof info !== 'object') return null
+      const record = info as Record<string, unknown>
+      const url =
+        (typeof record.Url === 'string' ? record.Url : null) ??
+        (typeof record.url === 'string' ? record.url : null)
+      if (!url) return null
+      const languageCode =
+        (typeof record.LanguageCodeName === 'string' ? record.LanguageCodeName : null) ??
+        (typeof record.LanguageID === 'string' ? record.LanguageID : null) ??
+        (typeof record.languageCode === 'string' ? record.languageCode : null) ??
+        (typeof record.language === 'string' ? record.language : null) ??
+        'unknown'
+      const urlExpire =
+        typeof record.UrlExpire === 'number'
+          ? record.UrlExpire
+          : typeof record.urlExpire === 'number'
+            ? record.urlExpire
+            : 0
+      const format =
+        (typeof record.Format === 'string' ? record.Format : null) ??
+        (typeof record.format === 'string' ? record.format : null) ??
+        'webvtt'
+      return { languageCode, url, urlExpire, format }
+    })
+    .filter((info): info is TikTokSubtitleInfo => Boolean(info))
+}
+
+function extractTikTokItemStruct(): TikTokItemStruct | null {
+  const universalData = readJsonScript('__UNIVERSAL_DATA_FOR_REHYDRATION__')
+  const fromUniversal = extractItemStructFromUniversal(universalData)
+  if (fromUniversal) return fromUniversal
+
+  const sigiData = readJsonScript('SIGI_STATE')
+  const fromSigi = extractItemStructFromSigiState(sigiData)
+  if (fromSigi) return fromSigi
+
+  return null
+}
+
+function extractItemStructFromUniversal(data: unknown): TikTokItemStruct | null {
+  if (!data || typeof data !== 'object') return null
+  const scope = (data as Record<string, unknown>).__DEFAULT_SCOPE__ as Record<string, unknown> | undefined
+  if (!scope) return null
+  const videoDetail = (scope['webapp.video-detail'] as Record<string, unknown> | undefined)
+    ?? (scope['webapp.detail'] as Record<string, unknown> | undefined)
+  const itemInfo = videoDetail?.itemInfo as Record<string, unknown> | undefined
+  const itemStruct = itemInfo?.itemStruct as TikTokItemStruct | undefined
+  return itemStruct ?? null
+}
+
+function extractItemStructFromSigiState(data: unknown): TikTokItemStruct | null {
+  if (!data || typeof data !== 'object') return null
+  const itemModule = (data as Record<string, unknown>).ItemModule as Record<string, unknown> | undefined
+  if (!itemModule || typeof itemModule !== 'object') return null
+
+  const videoId = extractTikTokVideoIdFromUrl()
+  const candidate = videoId ? itemModule[videoId] : null
+  if (candidate && typeof candidate === 'object') {
+    return candidate as TikTokItemStruct
+  }
+
+  const first = Object.values(itemModule).find((value) => value && typeof value === 'object') as TikTokItemStruct | undefined
+  return first ?? null
+}
+
+function readJsonScript(id: string): unknown | null {
+  const scriptEl = document.getElementById(id)
+  if (!scriptEl?.textContent) return null
+  try {
+    return JSON.parse(scriptEl.textContent)
+  } catch {
+    return null
+  }
+}
+
+function extractTikTokVideoIdFromUrl(): string | null {
+  const url = window.location.href
+  const match = url.match(/\/video\/(\d+)/) || url.match(/\/v\/(\d+)/)
+  return match?.[1] ?? null
+}
+
 /**
  * Parse WebVTT content into text and segments.
  */
@@ -253,12 +263,12 @@ function parseWebVtt(vtt: string): { text: string; segments: TranscriptSegment[]
 
     // Check for timestamp line (HH:MM:SS.mmm format)
     const timestampMatch = line.match(
-      /^(\d{2}):(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[.,](\d{3})/
+      /^(\d{1,2}):(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[.,](\d{3})/
     )
     if (!timestampMatch) {
       // Also try MM:SS.mmm format
       const shortMatch = line.match(
-        /^(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{2}):(\d{2})[.,](\d{3})/
+        /^(\d{1,2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{1,2}):(\d{2})[.,](\d{3})/
       )
       if (shortMatch) {
         const startMs =

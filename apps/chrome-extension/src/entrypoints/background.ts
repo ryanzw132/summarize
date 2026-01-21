@@ -229,12 +229,17 @@ function resolveOptionsUrl(): string {
 
 const OFFSCREEN_CLIPBOARD_URL = chrome.runtime.getURL('offscreen.html')
 let offscreenClipboardPromise: Promise<void> | null = null
+let offscreenClipboardReady = false
 
 async function ensureOffscreenClipboard(): Promise<boolean> {
   if (!chrome.offscreen?.createDocument) return false
 
   try {
+    if (offscreenClipboardReady) {
+      return true
+    }
     if (chrome.offscreen.hasDocument && await chrome.offscreen.hasDocument()) {
+      offscreenClipboardReady = true
       return true
     }
 
@@ -249,8 +254,14 @@ async function ensureOffscreenClipboard(): Promise<boolean> {
     }
 
     await offscreenClipboardPromise
+    offscreenClipboardReady = true
     return true
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    if (message.includes('Only one offscreen document')) {
+      offscreenClipboardReady = true
+      return true
+    }
     console.error('[Background] Failed to create offscreen document:', err)
     return false
   }
@@ -2491,6 +2502,9 @@ export default defineBackground(() => {
               extracted?: {
                 content?: string
                 transcriptTimedText?: string
+                transcriptSource?: string | null
+                transcriptCharacters?: number | null
+                transcriptLines?: number | null
               }
             }
 
@@ -2513,7 +2527,16 @@ export default defineBackground(() => {
               throw new Error(data.error || 'Failed to fetch transcript')
             }
 
-            let transcriptText = data.extracted?.content || data.extracted?.transcriptTimedText || null
+            const hasTranscript = Boolean(data.extracted?.transcriptSource)
+              || (data.extracted?.transcriptCharacters ?? 0) > 0
+              || (data.extracted?.transcriptLines ?? 0) > 0
+              || Boolean(data.extracted?.transcriptTimedText)
+            let transcriptText = data.extracted?.transcriptTimedText
+              || (hasTranscript ? data.extracted?.content : null)
+
+            if (transcriptText && transcriptText.trim().toLowerCase().startsWith('transcript:')) {
+              transcriptText = transcriptText.replace(/^transcript:\s*/i, '')
+            }
             console.log('[Transcript Button BG] Transcript text length:', transcriptText?.length || 0)
 
             // Clean up timed text (remove timestamps in various formats)

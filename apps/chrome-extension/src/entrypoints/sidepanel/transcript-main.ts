@@ -733,6 +733,9 @@ async function fetchTranscript() {
       extracted?: {
         content?: string
         transcriptTimedText?: string
+        transcriptSource?: string | null
+        transcriptCharacters?: number | null
+        transcriptLines?: number | null
       }
     }
 
@@ -765,7 +768,16 @@ async function fetchTranscript() {
     setProgress(90)
 
     // Extract transcript text
-    let transcriptText = data.extracted?.content || data.extracted?.transcriptTimedText || null
+    const hasTranscript = Boolean(data.extracted?.transcriptSource)
+      || (data.extracted?.transcriptCharacters ?? 0) > 0
+      || (data.extracted?.transcriptLines ?? 0) > 0
+      || Boolean(data.extracted?.transcriptTimedText)
+    let transcriptText = data.extracted?.transcriptTimedText
+      || (hasTranscript ? data.extracted?.content : null)
+
+    if (transcriptText && transcriptText.trim().toLowerCase().startsWith('transcript:')) {
+      transcriptText = transcriptText.replace(/^transcript:\s*/i, '')
+    }
     console.log('[Transcript] Extracted text length:', transcriptText?.length || 0)
 
     // If we got timed text, clean it up (remove timestamps in various formats)

@@ -101,6 +101,25 @@ function extractInstagramVideoInfo(): {
     videoUrl = ogVideo?.content || null
   }
 
+  // Fallback: search scripts for direct video URL (GraphQL payloads)
+  if (!videoUrl) {
+    const scripts = document.querySelectorAll('script')
+    for (const script of scripts) {
+      const text = script.textContent || ''
+      if (!text.includes('video_url')) continue
+      const match = text.match(/"video_url":"(https:\\/\\/[^"]+)"/)
+      if (match?.[1]) {
+        const decoded = match[1]
+          .replace(/\\u0026/g, '&')
+          .replace(/\\\//g, '/')
+        if (decoded.includes('cdninstagram.com') || decoded.includes('fbcdn.net')) {
+          videoUrl = decoded
+          break
+        }
+      }
+    }
+  }
+
   // Get title from page
   const title = document.querySelector('meta[property="og:title"]')?.getAttribute('content')
     || document.title
