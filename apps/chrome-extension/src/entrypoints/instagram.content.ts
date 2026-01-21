@@ -30,7 +30,7 @@ type InstagramMetadataResponse = {
 }
 
 // Maximum blob size to convert to data URL (50MB)
-const MAX_BLOB_SIZE_BYTES = 50 * 1024 * 1024
+const MAX_BLOB_SIZE_BYTES = 15 * 1024 * 1024  // 15MB - base64 expands to ~20MB, under Chrome limits
 
 /**
  * Extract video URL from Instagram Reel page.
@@ -424,7 +424,7 @@ async function extractTranscript(): Promise<InstagramTranscriptResponse> {
         const sizeMB = (captured.blob.size / 1024 / 1024).toFixed(1)
         return {
           ok: false,
-          error: `Video is too large (${sizeMB}MB) to process. Max size is 50MB.`,
+          error: `Video is too large (${sizeMB}MB) to process. Max size is 15MB.`,
           reason: 'blob_too_large',
         }
       }

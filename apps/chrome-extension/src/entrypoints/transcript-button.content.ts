@@ -178,7 +178,7 @@ async function handleButtonClick() {
 
   try {
     // Send message to background script to fetch transcript with timeout
-    // 90 seconds allows: 10s TikTok content script + 15s buffer + 45s daemon + 20s buffer
+    // 90 seconds allows: 10s TikTok content script + 60s daemon + 20s buffer
     const timeoutMs = 90000
     console.log('[Transcript Button] Sending message to background script...')
 

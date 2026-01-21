@@ -55,7 +55,7 @@ type VideoMetadataResponse = {
 // Constants
 const CONTENT_SCRIPT_TIMEOUT_MS = 10000  // 10 seconds
 const DAEMON_REQUEST_TIMEOUT_MS = 30000  // 30 seconds for daemon request
-const MAX_BLOB_SIZE_BYTES = 50 * 1024 * 1024  // 50MB max for data URL encoding
+const MAX_BLOB_SIZE_BYTES = 15 * 1024 * 1024  // 15MB - base64 expands to ~20MB, under Chrome limits
 
 // Error codes for debugging
 type ErrorCode =
@@ -165,23 +165,30 @@ const collectedTranscripts: Array<{
 
 /**
  * Wrap a fetch request with a timeout.
+ * Respects both the timeout and any caller-provided abort signal.
  */
 async function fetchWithTimeout(
   url: string,
   options: RequestInit,
   timeoutMs: number
 ): Promise<Response> {
-  const controller = new AbortController()
+  const timeoutController = new AbortController()
   const timeoutId = setTimeout(() => {
     console.log('[Transcript] Fetch timeout triggered after', timeoutMs, 'ms')
-    controller.abort()
+    timeoutController.abort()
   }, timeoutMs)
+
+  // Combine caller's signal (if any) with our timeout signal
+  const callerSignal = options.signal
+  const combinedSignal = callerSignal
+    ? AbortSignal.any([callerSignal, timeoutController.signal])
+    : timeoutController.signal
 
   try {
     console.log('[Transcript] Starting fetch to', url)
     const response = await fetch(url, {
       ...options,
-      signal: controller.signal,
+      signal: combinedSignal,
     })
     clearTimeout(timeoutId)
     console.log('[Transcript] Fetch completed with status', response.status)
@@ -190,7 +197,11 @@ async function fetchWithTimeout(
     clearTimeout(timeoutId)
     console.log('[Transcript] Fetch error:', err)
     if (err instanceof Error) {
+      // Check if aborted by caller vs timeout
       if (err.name === 'AbortError') {
+        if (callerSignal?.aborted) {
+          throw err // Re-throw caller's abort as-is
+        }
         throw new Error('Request timed out after ' + (timeoutMs / 1000) + ' seconds')
       }
       // Network errors (daemon not running)

@@ -2351,7 +2351,7 @@ export default defineBackground(() => {
             console.log('[Transcript Button BG] Making daemon request to:', urlToFetch.substring(0, 100))
 
             // Make request to daemon with timeout
-            const DAEMON_TIMEOUT_MS = 45000 // 45 seconds for video transcription
+            const DAEMON_TIMEOUT_MS = 60000 // 60 seconds for video transcription
             const controller = new AbortController()
             const timeoutId = setTimeout(() => {
               console.log('[Transcript Button BG] Daemon request timeout triggered')
