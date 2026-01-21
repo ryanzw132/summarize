@@ -98,6 +98,76 @@ const TRANSCRIPT_ICON = `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/
 const CHECK_ICON = `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>`
 const ERROR_ICON = `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>`
 
+/**
+ * Copy text to clipboard with multiple fallbacks.
+ * Tries: 1) Clipboard API, 2) execCommand with visible textarea, 3) Background script
+ */
+async function copyToClipboard(text: string): Promise<void> {
+  // Try modern Clipboard API first
+  try {
+    await navigator.clipboard.writeText(text)
+    console.log('[Transcript Button] Copied via Clipboard API')
+    return
+  } catch (clipboardError) {
+    console.log('[Transcript Button] Clipboard API failed, trying execCommand:', clipboardError)
+  }
+
+  // Fallback 1: use textarea + execCommand with better visibility/focus handling
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  // Make it minimally visible but still in the document flow for execCommand to work
+  textarea.style.position = 'fixed'
+  textarea.style.left = '0'
+  textarea.style.top = '0'
+  textarea.style.width = '1px'
+  textarea.style.height = '1px'
+  textarea.style.padding = '0'
+  textarea.style.border = 'none'
+  textarea.style.outline = 'none'
+  textarea.style.boxShadow = 'none'
+  textarea.style.background = 'transparent'
+  textarea.style.color = 'transparent'
+  textarea.style.zIndex = '2147483647'
+  document.body.appendChild(textarea)
+
+  try {
+    // Focus and select
+    textarea.focus()
+    textarea.select()
+    textarea.setSelectionRange(0, text.length)
+
+    const success = document.execCommand('copy')
+    if (success) {
+      console.log('[Transcript Button] Copied via execCommand')
+      return
+    }
+  } catch (e) {
+    console.log('[Transcript Button] execCommand failed:', e)
+  } finally {
+    document.body.removeChild(textarea)
+  }
+
+  // Fallback 2: Ask background script to copy via offscreen document
+  console.log('[Transcript Button] Trying background script clipboard...')
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'copy-to-clipboard',
+      text: text,
+    }) as { ok: boolean; error?: string }
+
+    if (response?.ok) {
+      console.log('[Transcript Button] Copied via background script')
+      return
+    }
+    throw new Error(response?.error || 'Background clipboard failed')
+  } catch (bgError) {
+    console.log('[Transcript Button] Background clipboard failed:', bgError)
+  }
+
+  // All methods failed - throw error
+  throw new Error('All clipboard methods failed')
+}
+
 let button: HTMLButtonElement | null = null
 let tooltipEl: HTMLSpanElement | null = null
 let currentState: ButtonState = 'idle'
@@ -178,8 +248,8 @@ async function handleButtonClick() {
 
   try {
     // Send message to background script to fetch transcript with timeout
-    // 90 seconds allows: 10s TikTok content script + 60s daemon + 20s buffer
-    const timeoutMs = 90000
+    // 30 seconds is reasonable for transcription - longer waits provide poor UX
+    const timeoutMs = 30000
     console.log('[Transcript Button] Sending message to background script...')
 
     const response = await Promise.race([
@@ -201,7 +271,7 @@ async function handleButtonClick() {
 
     if (response?.ok && response.text && response.text.length > 0) {
       console.log('[Transcript Button] Copying transcript to clipboard, length:', response.text.length)
-      await navigator.clipboard.writeText(response.text)
+      await copyToClipboard(response.text)
       updateButtonState('success', 'Copied!')
     } else {
       const errorMsg = response?.error || 'No transcript available'

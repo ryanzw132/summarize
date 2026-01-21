@@ -127,10 +127,17 @@ export async function buildResultFromHtmlDocument({
     cacheMode,
   })
 
+  // For YouTube URLs, only use the video's actual description (not generic page content)
+  // When transcript is unavailable, we should NOT fall back to og:description
+  // which contains generic text like "Enjoy the videos and music you love..."
+  const isYoutube = isYouTubeUrl(url)
   const youtubeDescription =
-    transcriptResolution.text === null ? extractYouTubeShortDescription(html) : null
-  const baseCandidate = youtubeDescription
-    ? normalizeForPrompt(youtubeDescription)
+    transcriptResolution.text === null && isYoutube ? extractYouTubeShortDescription(html) : null
+
+  // For YouTube: use video description if available, otherwise empty string (not page content)
+  // For non-YouTube: use the normal page content extraction
+  const baseCandidate = isYoutube
+    ? (youtubeDescription ? normalizeForPrompt(youtubeDescription) : '')
     : effectiveNormalizedWithDescription
 
   let baseContent = selectBaseContent(baseCandidate, transcriptResolution.text)

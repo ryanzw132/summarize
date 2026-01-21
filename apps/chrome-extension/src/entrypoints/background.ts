@@ -2298,12 +2298,14 @@ export default defineBackground(() => {
                 ok?: boolean
                 text?: string
                 error?: string
+                reason?: string
               }>('tiktok-transcript', 'content-scripts/tiktok.js')
 
               console.log('[Transcript Button BG] TikTok content script response:', {
                 ok: response?.ok,
                 hasText: !!response?.text,
-                error: (response as { error?: string })?.error
+                error: (response as { error?: string })?.error,
+                reason: (response as { reason?: string })?.reason
               })
 
               if (response?.ok && response.text) {
@@ -2311,8 +2313,18 @@ export default defineBackground(() => {
                 sendResponse({ ok: true, text: response.text })
                 return
               }
-              console.log('[Transcript Button BG] No TikTok captions, falling through to daemon...')
-              // Fall through to daemon if no captions
+
+              // If TikTok has no native captions, fail fast instead of waiting for daemon timeout
+              // The daemon would try yt-dlp which is slow and often blocked by TikTok
+              const reason = (response as { reason?: string })?.reason
+              if (reason === 'no_captions') {
+                console.log('[Transcript Button BG] TikTok has no captions, failing fast')
+                sendResponse({ ok: false, error: 'No captions available' })
+                return
+              }
+
+              console.log('[Transcript Button BG] TikTok extraction failed, falling through to daemon...')
+              // Only fall through to daemon for other failures (e.g., page structure changed)
             }
 
             // For Instagram, try to get video URL from content script for better daemon handling
@@ -2351,7 +2363,8 @@ export default defineBackground(() => {
             console.log('[Transcript Button BG] Making daemon request to:', urlToFetch.substring(0, 100))
 
             // Make request to daemon with timeout
-            const DAEMON_TIMEOUT_MS = 60000 // 60 seconds for video transcription
+            // 25 seconds - must be less than the 30s content script timeout
+            const DAEMON_TIMEOUT_MS = 25000
             const controller = new AbortController()
             const timeoutId = setTimeout(() => {
               console.log('[Transcript Button BG] Daemon request timeout triggered')
@@ -2488,6 +2501,49 @@ export default defineBackground(() => {
             } else {
               sendResponse({ ok: false, error: message })
             }
+          }
+        })()
+        return true
+      }
+
+      // Handle clipboard copy requests from content scripts
+      if (type === 'copy-to-clipboard') {
+        const msg = raw as { type: 'copy-to-clipboard'; text: string }
+        const tabId = sender.tab?.id
+        if (!tabId) {
+          sendResponse({ ok: false, error: 'No tab ID' })
+          return true
+        }
+
+        void (async () => {
+          try {
+            // Use chrome.scripting.executeScript to copy in the page context
+            // This creates a fresh execution context that can access clipboard
+            const results = await chrome.scripting.executeScript({
+              target: { tabId },
+              func: (text: string) => {
+                const textarea = document.createElement('textarea')
+                textarea.value = text
+                textarea.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;'
+                document.body.appendChild(textarea)
+                textarea.focus()
+                textarea.select()
+                const success = document.execCommand('copy')
+                document.body.removeChild(textarea)
+                return success
+              },
+              args: [msg.text],
+            })
+
+            const success = results?.[0]?.result
+            if (success) {
+              sendResponse({ ok: true })
+            } else {
+              sendResponse({ ok: false, error: 'execCommand failed' })
+            }
+          } catch (err) {
+            console.error('[Background] Clipboard copy failed:', err)
+            sendResponse({ ok: false, error: err instanceof Error ? err.message : 'Clipboard failed' })
           }
         })()
         return true
