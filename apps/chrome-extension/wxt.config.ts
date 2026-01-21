@@ -64,6 +64,7 @@ export default defineConfig({
         'webNavigation',
         'scripting',
         'windows',
+        ...(browser === 'firefox' ? [] : ['offscreen' as const, 'clipboardWrite' as const]),
         ...(browser === 'firefox' ? [] : ['debugger' as const]),
       ],
       optional_permissions: ['userScripts'],

@@ -34,7 +34,7 @@ type InstagramTranscriptResponse =
       durationSeconds: number | null
       title: string | null
     }
-  | { ok: false; error: string; reason: 'no_video' | 'extraction_failed' | 'blob_too_large' }
+  | { ok: false; error: string; reason: 'no_video' | 'extraction_failed' | 'unsupported_url' }
 
 // Metadata response types
 type VideoMetadataResponse = {
@@ -55,7 +55,6 @@ type VideoMetadataResponse = {
 // Constants
 const CONTENT_SCRIPT_TIMEOUT_MS = 10000  // 10 seconds
 const DAEMON_REQUEST_TIMEOUT_MS = 30000  // 30 seconds for daemon request
-const MAX_BLOB_SIZE_BYTES = 15 * 1024 * 1024  // 15MB - base64 expands to ~20MB, under Chrome limits
 
 // Error codes for debugging
 type ErrorCode =
@@ -1073,6 +1072,8 @@ function addTranscriptToList(text: string, metadata: VideoMetadataResponse | nul
     const statParts: string[] = []
     if (metadata.stats.views !== null) statParts.push(`${formatNumber(metadata.stats.views)} views`)
     if (metadata.stats.likes !== null) statParts.push(`${formatNumber(metadata.stats.likes)} likes`)
+    if (metadata.stats.comments !== null) statParts.push(`${formatNumber(metadata.stats.comments)} comments`)
+    if (metadata.stats.shares !== null) statParts.push(`${formatNumber(metadata.stats.shares)} shares`)
     statsLabel.textContent = statParts.join(' · ')
     header.appendChild(statsLabel)
   }

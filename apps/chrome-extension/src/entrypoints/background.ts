@@ -227,6 +227,86 @@ function resolveOptionsUrl(): string {
   return chrome.runtime.getURL(page)
 }
 
+const OFFSCREEN_CLIPBOARD_URL = chrome.runtime.getURL('offscreen.html')
+let offscreenClipboardPromise: Promise<void> | null = null
+
+async function ensureOffscreenClipboard(): Promise<boolean> {
+  if (!chrome.offscreen?.createDocument) return false
+
+  try {
+    if (chrome.offscreen.hasDocument && await chrome.offscreen.hasDocument()) {
+      return true
+    }
+
+    if (!offscreenClipboardPromise) {
+      offscreenClipboardPromise = chrome.offscreen.createDocument({
+        url: OFFSCREEN_CLIPBOARD_URL,
+        reasons: [chrome.offscreen.Reason.CLIPBOARD],
+        justification: 'Copy transcript text to clipboard',
+      }).finally(() => {
+        offscreenClipboardPromise = null
+      })
+    }
+
+    await offscreenClipboardPromise
+    return true
+  } catch (err) {
+    console.error('[Background] Failed to create offscreen document:', err)
+    return false
+  }
+}
+
+async function copyViaOffscreen(text: string): Promise<{ ok: boolean; error?: string }> {
+  const ready = await ensureOffscreenClipboard()
+  if (!ready) {
+    return { ok: false, error: 'Offscreen document unavailable' }
+  }
+
+  // Retry logic: offscreen document may not be ready immediately after creation
+  // The script needs time to set up its message listener
+  const maxAttempts = 3
+  const delayBetweenAttempts = 100
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      // Small delay on first attempt after document creation to let script initialize
+      if (attempt === 1) {
+        await new Promise((r) => setTimeout(r, 50))
+      }
+
+      const response = await chrome.runtime.sendMessage({
+        type: 'offscreen-copy',
+        text,
+      }) as { ok?: boolean; error?: string } | undefined
+
+      if (response?.ok) {
+        return { ok: true }
+      }
+
+      // If we got a response but it wasn't ok, don't retry (actual failure)
+      if (response !== undefined) {
+        return { ok: false, error: response?.error || 'Offscreen clipboard failed' }
+      }
+
+      // No response (undefined) means listener might not be ready, retry
+      if (attempt < maxAttempts) {
+        console.log(`[Background] Offscreen no response, retrying (${attempt}/${maxAttempts})...`)
+        await new Promise((r) => setTimeout(r, delayBetweenAttempts))
+      }
+    } catch (err) {
+      // On error, retry if we have attempts left
+      if (attempt < maxAttempts) {
+        console.log(`[Background] Offscreen error, retrying (${attempt}/${maxAttempts}):`, err)
+        await new Promise((r) => setTimeout(r, delayBetweenAttempts))
+      } else {
+        return { ok: false, error: err instanceof Error ? err.message : 'Offscreen clipboard failed' }
+      }
+    }
+  }
+
+  return { ok: false, error: 'Offscreen clipboard not responding' }
+}
+
 async function openOptionsWindow() {
   const url = resolveOptionsUrl()
   try {
@@ -2344,11 +2424,13 @@ export default defineBackground(() => {
                 error: response?.error
               })
 
-              // Accept https URLs and data URLs (blob converted to base64)
+              // Only accept HTTPS URLs (daemon/yt-dlp cannot handle blob/data URLs)
               if (response?.ok && response.videoUrl) {
-                if (response.videoUrl.startsWith('https://') || response.videoUrl.startsWith('data:')) {
+                if (response.videoUrl.startsWith('https://')) {
                   extractedVideoUrl = response.videoUrl
                   console.log('[Transcript Button BG] Using extracted video URL')
+                } else {
+                  console.log('[Transcript Button BG] Ignoring non-HTTPS video URL:', response.videoUrl.slice(0, 20))
                 }
               }
             }
@@ -2517,6 +2599,13 @@ export default defineBackground(() => {
 
         void (async () => {
           try {
+            const offscreenResult = await copyViaOffscreen(msg.text)
+            if (offscreenResult.ok) {
+              sendResponse({ ok: true })
+              return
+            }
+            console.warn('[Background] Offscreen clipboard failed:', offscreenResult.error)
+
             // Use chrome.scripting.executeScript to copy in the page context
             // This creates a fresh execution context that can access clipboard
             const results = await chrome.scripting.executeScript({

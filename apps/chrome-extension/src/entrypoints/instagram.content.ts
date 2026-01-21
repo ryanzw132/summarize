@@ -9,7 +9,7 @@ type InstagramTranscriptResponse =
       durationSeconds: number | null
       title: string | null
     }
-  | { ok: false; error: string; reason: 'no_video' | 'extraction_failed' | 'blob_too_large' }
+  | { ok: false; error: string; reason: 'no_video' | 'extraction_failed' | 'unsupported_url' }
 
 type InstagramMetadataRequest = { type: 'instagram-metadata' }
 type InstagramScrollNextRequest = { type: 'instagram-scroll-next' }
@@ -28,9 +28,6 @@ type InstagramMetadataResponse = {
     shares: number | null
   }
 }
-
-// Maximum blob size to convert to data URL (50MB)
-const MAX_BLOB_SIZE_BYTES = 15 * 1024 * 1024  // 15MB - base64 expands to ~20MB, under Chrome limits
 
 /**
  * Extract video URL from Instagram Reel page.
@@ -60,6 +57,11 @@ function extractInstagramVideoInfo(): {
     if (typeof videoEl.duration === 'number' && Number.isFinite(videoEl.duration) && videoEl.duration > 0) {
       durationSeconds = videoEl.duration
     }
+  }
+
+  // If we only have a blob/data URL, treat it as unusable and keep searching.
+  if (videoUrl?.startsWith('blob:') || videoUrl?.startsWith('data:')) {
+    videoUrl = null
   }
 
   // Try to extract from Instagram's shared data (embedded in page)
@@ -146,6 +148,7 @@ function parseInstagramNumber(text: string | null): number | null {
 
 /**
  * Extract stats from DOM elements
+ * Instagram Reels show stats in action buttons on the right side of the video
  */
 function extractStatsFromDOM(): { views: number | null; likes: number | null; comments: number | null; shares: number | null } {
   const stats = { views: null as number | null, likes: null as number | null, comments: null as number | null, shares: null as number | null }
@@ -154,29 +157,43 @@ function extractStatsFromDOM(): { views: number | null; likes: number | null; co
   // Instagram shows "X likes", "X views", "X comments"
   const article = document.querySelector('article') || document
 
-  // Look for likes - often in a button or span with "likes" text
-  const allElements = article.querySelectorAll('span, button, a, section')
+  // Look for all interactive elements that might contain stats
+  const allElements = article.querySelectorAll('span, button, a, section, div[role="button"]')
   for (const el of allElements) {
     const text = el.textContent?.trim() || ''
     const ariaLabel = el.getAttribute('aria-label') || ''
 
     // Check aria-label first (more reliable)
     if (ariaLabel) {
+      // Likes: "Like", "X likes", "like this video along with X other people"
       const likesMatch = ariaLabel.match(/([\d,]+(?:\.\d+)?[KMB]?)\s*likes?/i)
+        || ariaLabel.match(/along with\s*([\d,]+(?:\.\d+)?[KMB]?)\s*other/i)
       if (likesMatch && stats.likes === null) {
         stats.likes = parseInstagramNumber(likesMatch[1])
       }
-      const viewsMatch = ariaLabel.match(/([\d,]+(?:\.\d+)?[KMB]?)\s*(?:views?|plays?)/i)
+
+      // Views/Plays
+      const viewsMatch = ariaLabel.match(/([\d,]+(?:\.\d+)?[KMB]?)\s*(?:views?|plays?|watch)/i)
       if (viewsMatch && stats.views === null) {
         stats.views = parseInstagramNumber(viewsMatch[1])
       }
+
+      // Comments
       const commentsMatch = ariaLabel.match(/([\d,]+(?:\.\d+)?[KMB]?)\s*comments?/i)
+        || ariaLabel.match(/view all\s*([\d,]+(?:\.\d+)?[KMB]?)\s*comments?/i)
       if (commentsMatch && stats.comments === null) {
         stats.comments = parseInstagramNumber(commentsMatch[1])
       }
+
+      // Shares (rarely shown but check anyway)
+      const sharesMatch = ariaLabel.match(/([\d,]+(?:\.\d+)?[KMB]?)\s*shares?/i)
+      if (sharesMatch && stats.shares === null) {
+        stats.shares = parseInstagramNumber(sharesMatch[1])
+      }
     }
 
-    // Check text content
+    // Check text content - Instagram Reels show numbers below action buttons
+    // Match standalone numbers or numbers with K/M/B suffix
     const likesTextMatch = text.match(/^([\d,]+(?:\.\d+)?[KMB]?)\s*likes?$/i)
     if (likesTextMatch && stats.likes === null) {
       stats.likes = parseInstagramNumber(likesTextMatch[1])
@@ -188,6 +205,54 @@ function extractStatsFromDOM(): { views: number | null; likes: number | null; co
     const commentsTextMatch = text.match(/^([\d,]+(?:\.\d+)?[KMB]?)\s*comments?$/i)
     if (commentsTextMatch && stats.comments === null) {
       stats.comments = parseInstagramNumber(commentsTextMatch[1])
+    }
+
+    // Also check for "View all X comments" link
+    const viewAllCommentsMatch = text.match(/view all\s*([\d,]+(?:\.\d+)?[KMB]?)\s*comments?/i)
+    if (viewAllCommentsMatch && stats.comments === null) {
+      stats.comments = parseInstagramNumber(viewAllCommentsMatch[1])
+    }
+  }
+
+  // Instagram Reels: Look for action buttons with counts
+  // The like/comment/share buttons often have sibling spans with the count
+  const actionButtons = document.querySelectorAll('[aria-label*="Like"], [aria-label*="Comment"], [aria-label*="Share"], [aria-label*="Send"]')
+  for (const btn of actionButtons) {
+    const ariaLabel = btn.getAttribute('aria-label') || ''
+    const parent = btn.parentElement
+
+    // Find sibling or child span with a number
+    const siblingSpans = parent?.querySelectorAll('span') || []
+    for (const span of siblingSpans) {
+      const spanText = span.textContent?.trim() || ''
+      // Match standalone numbers like "1,234" or "1.2K"
+      const numberMatch = spanText.match(/^([\d,]+(?:\.\d+)?[KMB]?)$/i)
+      if (numberMatch) {
+        const count = parseInstagramNumber(numberMatch[1])
+        if (count !== null) {
+          if (ariaLabel.toLowerCase().includes('like') && stats.likes === null) {
+            stats.likes = count
+          } else if (ariaLabel.toLowerCase().includes('comment') && stats.comments === null) {
+            stats.comments = count
+          } else if ((ariaLabel.toLowerCase().includes('share') || ariaLabel.toLowerCase().includes('send')) && stats.shares === null) {
+            stats.shares = count
+          }
+        }
+      }
+    }
+  }
+
+  // Look for views count in Reels - often shown at bottom of video
+  // Format: "X plays" or just a number near play icon
+  if (stats.views === null) {
+    const viewElements = document.querySelectorAll('[class*="view"], [class*="play"], span')
+    for (const el of viewElements) {
+      const text = el.textContent?.trim() || ''
+      const playsMatch = text.match(/^([\d,]+(?:\.\d+)?[KMB]?)\s*(?:plays?|views?)$/i)
+      if (playsMatch) {
+        stats.views = parseInstagramNumber(playsMatch[1])
+        break
+      }
     }
   }
 
@@ -334,41 +399,6 @@ function extractInstagramMetadata(): InstagramMetadataResponse {
 }
 
 /**
- * Try to capture video blob from network requests.
- * This intercepts the video that's already loaded in the player.
- * Includes 30-second timeout to prevent hanging on slow/blocked requests.
- */
-async function captureVideoBlob(): Promise<{ blob: Blob; url: string } | null> {
-  const videoEl = document.querySelector('video') as HTMLVideoElement | null
-  if (!videoEl?.src) return null
-
-  const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), 30000) // 30 second timeout
-
-  try {
-    // If it's a blob URL, we can access it directly
-    if (videoEl.src.startsWith('blob:')) {
-      const response = await fetch(videoEl.src, { signal: controller.signal })
-      const blob = await response.blob()
-      return { blob, url: videoEl.src }
-    }
-
-    // For regular URLs, try to fetch (may be CORS blocked)
-    const response = await fetch(videoEl.src, { mode: 'cors', signal: controller.signal })
-    if (response.ok) {
-      const blob = await response.blob()
-      return { blob, url: videoEl.src }
-    }
-  } catch {
-    // CORS, network error, or timeout
-  } finally {
-    clearTimeout(timeoutId)
-  }
-
-  return null
-}
-
-/**
  * Scroll to the next Instagram Reel.
  */
 function scrollToNextReel(): InstagramScrollNextResponse {
@@ -416,46 +446,18 @@ async function extractTranscript(): Promise<InstagramTranscriptResponse> {
   const { videoUrl, durationSeconds, title } = extractInstagramVideoInfo()
 
   if (!videoUrl) {
-    // Try to capture video blob as fallback
-    const captured = await captureVideoBlob()
-    if (captured) {
-      // Check blob size before converting to data URL
-      if (captured.blob.size > MAX_BLOB_SIZE_BYTES) {
-        const sizeMB = (captured.blob.size / 1024 / 1024).toFixed(1)
-        return {
-          ok: false,
-          error: `Video is too large (${sizeMB}MB) to process. Max size is 15MB.`,
-          reason: 'blob_too_large',
-        }
-      }
-
-      // Convert blob to base64 data URL for transport
-      return new Promise((resolve) => {
-        const reader = new FileReader()
-        reader.onload = () => {
-          resolve({
-            ok: true,
-            videoUrl: reader.result as string, // data:video/mp4;base64,...
-            source: 'instagram-video',
-            durationSeconds,
-            title,
-          })
-        }
-        reader.onerror = () => {
-          resolve({
-            ok: false,
-            error: 'Failed to read video data',
-            reason: 'extraction_failed',
-          })
-        }
-        reader.readAsDataURL(captured.blob)
-      })
-    }
-
     return {
       ok: false,
-      error: 'No video found on this Instagram page',
+      error: 'No downloadable video URL found on this Instagram page',
       reason: 'no_video',
+    }
+  }
+
+  if (!videoUrl.startsWith('https://')) {
+    return {
+      ok: false,
+      error: 'Instagram video URL is not downloadable',
+      reason: 'unsupported_url',
     }
   }
 
