@@ -173,11 +173,15 @@ function updateButtonState(state: ButtonState, message?: string) {
 async function handleButtonClick() {
   if (currentState === 'loading') return
 
+  console.log('[Transcript Button] Button clicked, starting extraction...')
   updateButtonState('loading', 'Extracting transcript...')
 
   try {
     // Send message to background script to fetch transcript with timeout
-    const timeoutMs = 60000 // 60 second timeout for transcription
+    // 90 seconds allows: 10s TikTok content script + 15s buffer + 45s daemon + 20s buffer
+    const timeoutMs = 90000
+    console.log('[Transcript Button] Sending message to background script...')
+
     const response = await Promise.race([
       chrome.runtime.sendMessage({
         type: 'fetch-transcript-for-button',
@@ -188,7 +192,15 @@ async function handleButtonClick() {
       ),
     ])
 
-    if (response?.ok && response.text) {
+    console.log('[Transcript Button] Got response:', {
+      ok: response?.ok,
+      hasText: !!response?.text,
+      textLength: response?.text?.length,
+      error: response?.error
+    })
+
+    if (response?.ok && response.text && response.text.length > 0) {
+      console.log('[Transcript Button] Copying transcript to clipboard, length:', response.text.length)
       await navigator.clipboard.writeText(response.text)
       updateButtonState('success', 'Copied!')
     } else {

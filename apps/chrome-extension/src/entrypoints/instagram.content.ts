@@ -336,27 +336,33 @@ function extractInstagramMetadata(): InstagramMetadataResponse {
 /**
  * Try to capture video blob from network requests.
  * This intercepts the video that's already loaded in the player.
+ * Includes 30-second timeout to prevent hanging on slow/blocked requests.
  */
 async function captureVideoBlob(): Promise<{ blob: Blob; url: string } | null> {
   const videoEl = document.querySelector('video') as HTMLVideoElement | null
   if (!videoEl?.src) return null
 
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 30000) // 30 second timeout
+
   try {
     // If it's a blob URL, we can access it directly
     if (videoEl.src.startsWith('blob:')) {
-      const response = await fetch(videoEl.src)
+      const response = await fetch(videoEl.src, { signal: controller.signal })
       const blob = await response.blob()
       return { blob, url: videoEl.src }
     }
 
     // For regular URLs, try to fetch (may be CORS blocked)
-    const response = await fetch(videoEl.src, { mode: 'cors' })
+    const response = await fetch(videoEl.src, { mode: 'cors', signal: controller.signal })
     if (response.ok) {
       const blob = await response.blob()
       return { blob, url: videoEl.src }
     }
   } catch {
-    // CORS or network error
+    // CORS, network error, or timeout
+  } finally {
+    clearTimeout(timeoutId)
   }
 
   return null

@@ -698,20 +698,26 @@ async function fetchTranscript() {
     )
 
     // Check for stale fetch after daemon request
+    console.log('[Transcript] Checking if stale after daemon request...')
     if (isStale()) {
+      console.log('[Transcript] Request is stale, aborting')
       clearTimeout(safetyTimeoutId)
       return
     }
 
     setProgress(60)
     setStatus('Processing...')
+    console.log('[Transcript] Processing daemon response...')
 
     if (!response.ok) {
+      console.log('[Transcript] Response not OK, status:', response.status)
       const errorData = await response.json().catch(() => ({})) as { error?: string }
       throw new Error(errorData.error || `HTTP ${response.status}`)
     }
 
-    const data = await response.json() as {
+    // Parse JSON with timeout protection
+    console.log('[Transcript] Parsing JSON response...')
+    let data: {
       ok?: boolean
       error?: string
       extracted?: {
@@ -720,13 +726,29 @@ async function fetchTranscript() {
       }
     }
 
+    try {
+      const jsonPromise = response.json()
+      let jsonTimeoutId: ReturnType<typeof setTimeout> | undefined
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        jsonTimeoutId = setTimeout(() => reject(new Error('JSON parsing timed out')), 15000)
+      })
+      data = await Promise.race([jsonPromise, timeoutPromise]) as typeof data
+      clearTimeout(jsonTimeoutId)
+      console.log('[Transcript] JSON parsed successfully, ok:', data.ok)
+    } catch (parseErr) {
+      console.error('[Transcript] JSON parse error:', parseErr)
+      throw new Error('Failed to parse daemon response: ' + (parseErr instanceof Error ? parseErr.message : 'unknown'))
+    }
+
     // Check for stale fetch after parsing response
     if (isStale()) {
+      console.log('[Transcript] Request is stale after parsing, aborting')
       clearTimeout(safetyTimeoutId)
       return
     }
 
     if (!data.ok) {
+      console.log('[Transcript] Daemon returned error:', data.error)
       throw new Error(data.error || 'Failed to fetch transcript')
     }
 
@@ -734,12 +756,15 @@ async function fetchTranscript() {
 
     // Extract transcript text
     let transcriptText = data.extracted?.content || data.extracted?.transcriptTimedText || null
+    console.log('[Transcript] Extracted text length:', transcriptText?.length || 0)
 
-    // If we got timed text, clean it up (remove timestamps)
+    // If we got timed text, clean it up (remove timestamps in various formats)
+    // Formats: [MM:SS], [HH:MM:SS], [H:MM:SS], [M:SS], etc.
     if (transcriptText && transcriptText.includes('[')) {
       transcriptText = transcriptText
-        .replace(/\[\d{1,2}:\d{2}(?::\d{2})?\]\s*/g, '')
+        .replace(/\[\d{1,3}:\d{2}(?::\d{2})?\]\s*/g, '')  // [M:SS], [MM:SS], [H:MM:SS], [HH:MM:SS]
         .replace(/\n+/g, ' ')
+        .replace(/\s{2,}/g, ' ')  // Collapse multiple spaces
         .trim()
     }
 
@@ -747,6 +772,39 @@ async function fetchTranscript() {
 
     if (!transcriptText || transcriptText.trim().length === 0) {
       throw new Error('No transcript available for this video')
+    }
+
+    // Validate transcript is actually content, not an error/status message
+    const trimmedText = transcriptText.trim()
+    const MIN_TRANSCRIPT_LENGTH = 30  // Lowered since short videos exist
+
+    // Check for suspiciously short "transcripts" that are likely error messages
+    if (trimmedText.length < MIN_TRANSCRIPT_LENGTH) {
+      // Check for common error/status patterns with word boundaries
+      // Only reject if text looks like it's ONLY an error message
+      const errorPatterns = [
+        /^please wait/i,
+        /^loading/i,
+        /^error/i,
+        /^failed/i,
+        /^unavailable/i,
+        /^not found/i,
+        /^no transcript/i,
+        /^try again/i,
+        /please.*wait/i,
+        /loading.*please/i,
+      ]
+      const looksLikeError = errorPatterns.some(pattern => pattern.test(trimmedText))
+
+      if (looksLikeError) {
+        console.error('[Transcript] Daemon returned error/loading text instead of transcript:', trimmedText)
+        throw new Error(
+          'Could not transcribe this video. It may have no captions, or the platform ' +
+          'blocked the download. Try a different video or check daemon logs for details.'
+        )
+      }
+      // Even if it doesn't match patterns, warn about short text
+      console.warn('[Transcript] Warning: transcript is short:', trimmedText.length, 'chars')
     }
 
     clearTimeout(safetyTimeoutId)

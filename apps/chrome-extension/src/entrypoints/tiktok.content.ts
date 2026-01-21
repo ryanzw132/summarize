@@ -325,6 +325,7 @@ function parseWebVtt(vtt: string): { text: string; segments: TranscriptSegment[]
 
 /**
  * Fetch and parse TikTok captions from the subtitle URL.
+ * Includes a 10-second timeout to prevent hanging on slow/blocked requests.
  */
 async function fetchTikTokCaptions(
   subtitleInfos: TikTokSubtitleInfo[]
@@ -341,11 +342,15 @@ async function fetchTikTokCaptions(
     return null
   }
 
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
+
   try {
     const response = await fetch(selectedInfo.url, {
       headers: {
         Accept: 'text/vtt, */*',
       },
+      signal: controller.signal,
     })
 
     if (!response.ok) {
@@ -356,6 +361,8 @@ async function fetchTikTokCaptions(
     return parseWebVtt(vttContent)
   } catch {
     return null
+  } finally {
+    clearTimeout(timeoutId)
   }
 }
 

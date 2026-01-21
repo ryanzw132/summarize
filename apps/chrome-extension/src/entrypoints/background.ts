@@ -2293,30 +2293,51 @@ export default defineBackground(() => {
 
             // For TikTok, try content script extraction first (has native captions)
             if (isTikTok) {
+              console.log('[Transcript Button BG] TikTok detected, trying content script...')
               const response = await sendMessageWithRetry<{
                 ok?: boolean
                 text?: string
                 error?: string
               }>('tiktok-transcript', 'content-scripts/tiktok.js')
 
+              console.log('[Transcript Button BG] TikTok content script response:', {
+                ok: response?.ok,
+                hasText: !!response?.text,
+                error: (response as { error?: string })?.error
+              })
+
               if (response?.ok && response.text) {
+                console.log('[Transcript Button BG] TikTok captions found, returning')
                 sendResponse({ ok: true, text: response.text })
                 return
               }
+              console.log('[Transcript Button BG] No TikTok captions, falling through to daemon...')
               // Fall through to daemon if no captions
             }
 
             // For Instagram, try to get video URL from content script for better daemon handling
             let extractedVideoUrl: string | null = null
             if (isInstagram) {
+              console.log('[Transcript Button BG] Instagram detected, trying content script...')
               const response = await sendMessageWithRetry<{
                 ok?: boolean
                 videoUrl?: string
                 error?: string
               }>('instagram-transcript', 'content-scripts/instagram.js')
 
-              if (response?.ok && response.videoUrl?.startsWith('https://')) {
-                extractedVideoUrl = response.videoUrl
+              console.log('[Transcript Button BG] Instagram content script response:', {
+                ok: response?.ok,
+                hasVideoUrl: !!response?.videoUrl,
+                videoUrlPrefix: response?.videoUrl?.substring(0, 50),
+                error: response?.error
+              })
+
+              // Accept https URLs and data URLs (blob converted to base64)
+              if (response?.ok && response.videoUrl) {
+                if (response.videoUrl.startsWith('https://') || response.videoUrl.startsWith('data:')) {
+                  extractedVideoUrl = response.videoUrl
+                  console.log('[Transcript Button BG] Using extracted video URL')
+                }
               }
             }
 
@@ -2327,31 +2348,49 @@ export default defineBackground(() => {
 
             // Use extracted video URL if available (for better daemon handling)
             const urlToFetch = extractedVideoUrl || url
+            console.log('[Transcript Button BG] Making daemon request to:', urlToFetch.substring(0, 100))
 
-            // Make request to daemon
-            const daemonResponse = await fetch('http://127.0.0.1:8787/v1/summarize', {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                url: urlToFetch,
-                mode: 'url',
-                extractOnly: true,
-                timestamps: false,
-                maxCharacters: null,
-                // Enable video transcription mode for Instagram CDN URLs
-                ...(extractedVideoUrl ? { videoMode: 'transcript' } : {}),
-              }),
-            })
+            // Make request to daemon with timeout
+            const DAEMON_TIMEOUT_MS = 45000 // 45 seconds for video transcription
+            const controller = new AbortController()
+            const timeoutId = setTimeout(() => {
+              console.log('[Transcript Button BG] Daemon request timeout triggered')
+              controller.abort()
+            }, DAEMON_TIMEOUT_MS)
+
+            let daemonResponse: Response
+            try {
+              daemonResponse = await fetch('http://127.0.0.1:8787/v1/summarize', {
+                method: 'POST',
+                headers: {
+                  'Authorization': `Bearer ${token}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  url: urlToFetch,
+                  mode: 'url',
+                  extractOnly: true,
+                  timestamps: false,
+                  maxCharacters: null,
+                  // Enable video transcription mode for Instagram CDN URLs
+                  ...(extractedVideoUrl ? { videoMode: 'transcript' } : {}),
+                }),
+                signal: controller.signal,
+              })
+            } finally {
+              clearTimeout(timeoutId)
+            }
+
+            console.log('[Transcript Button BG] Daemon response status:', daemonResponse.status)
 
             if (!daemonResponse.ok) {
               const errorData = await daemonResponse.json().catch(() => ({})) as { error?: string }
               throw new Error(errorData.error || `HTTP ${daemonResponse.status}`)
             }
 
-            const data = await daemonResponse.json() as {
+            // Parse JSON with timeout protection
+            console.log('[Transcript Button BG] Parsing JSON response...')
+            let data: {
               ok?: boolean
               error?: string
               extracted?: {
@@ -2360,30 +2399,92 @@ export default defineBackground(() => {
               }
             }
 
+            try {
+              const jsonPromise = daemonResponse.json()
+              let jsonTimeoutId: ReturnType<typeof setTimeout> | undefined
+              const timeoutPromise = new Promise<never>((_, reject) => {
+                jsonTimeoutId = setTimeout(() => reject(new Error('JSON parsing timed out')), 15000)
+              })
+              data = await Promise.race([jsonPromise, timeoutPromise]) as typeof data
+              clearTimeout(jsonTimeoutId)
+              console.log('[Transcript Button BG] JSON parsed, ok:', data.ok)
+            } catch (parseErr) {
+              console.error('[Transcript Button BG] JSON parse error:', parseErr)
+              throw new Error('Failed to parse response')
+            }
+
             if (!data.ok) {
+              console.log('[Transcript Button BG] Daemon error:', data.error)
               throw new Error(data.error || 'Failed to fetch transcript')
             }
 
             let transcriptText = data.extracted?.content || data.extracted?.transcriptTimedText || null
+            console.log('[Transcript Button BG] Transcript text length:', transcriptText?.length || 0)
 
-            // Clean up timed text (remove timestamps)
+            // Clean up timed text (remove timestamps in various formats)
+            // Formats: [MM:SS], [HH:MM:SS], [H:MM:SS], [M:SS], etc.
             if (transcriptText && transcriptText.includes('[')) {
               transcriptText = transcriptText
-                .replace(/\[\d{1,2}:\d{2}(?::\d{2})?\]\s*/g, '')
+                .replace(/\[\d{1,3}:\d{2}(?::\d{2})?\]\s*/g, '')  // [M:SS], [MM:SS], [H:MM:SS], [HH:MM:SS]
                 .replace(/\n+/g, ' ')
+                .replace(/\s{2,}/g, ' ')  // Collapse multiple spaces
                 .trim()
             }
 
             if (!transcriptText || transcriptText.trim().length === 0) {
+              console.log('[Transcript Button BG] No transcript text found')
               throw new Error('No transcript available')
             }
 
-            sendResponse({ ok: true, text: transcriptText.trim() })
+            // Validate transcript is actual content, not an error/status message
+            const trimmedText = transcriptText.trim()
+            const MIN_TRANSCRIPT_LENGTH = 30  // Lowered since short videos exist
+
+            if (trimmedText.length < MIN_TRANSCRIPT_LENGTH) {
+              // Check for common error/loading page patterns with word boundaries
+              // Only reject if text looks like it's ONLY an error message
+              const errorPatterns = [
+                /^please wait/i,
+                /^loading/i,
+                /^error/i,
+                /^failed/i,
+                /^unavailable/i,
+                /^not found/i,
+                /^no transcript/i,
+                /^try again/i,
+                /please.*wait/i,
+                /loading.*please/i,
+              ]
+              const looksLikeError = errorPatterns.some(pattern => pattern.test(trimmedText))
+
+              if (looksLikeError) {
+                console.error('[Transcript Button BG] Daemon returned error/loading text:', trimmedText)
+                throw new Error('Could not transcribe - no captions or download blocked')
+              }
+              console.warn('[Transcript Button BG] Warning: transcript is short:', trimmedText.length, 'chars')
+            }
+
+            console.log('[Transcript Button BG] Sending success response')
+            sendResponse({ ok: true, text: trimmedText })
 
           } catch (err) {
             const message = err instanceof Error ? err.message : 'Unknown error'
-            if (message.includes('Failed to fetch') || message.includes('NetworkError')) {
+            const isAborted = err instanceof Error && err.name === 'AbortError'
+            const isNetworkError = message.includes('Failed to fetch') || message.includes('NetworkError')
+            const isTikTokYtDlpError = isTikTok && (
+              message.includes('yt-dlp') ||
+              message.includes('Unable to extract') ||
+              message.includes('blocked') ||
+              message.includes('no_captions')
+            )
+
+            if (isAborted) {
+              sendResponse({ ok: false, error: 'Request timed out' })
+            } else if (isNetworkError) {
               sendResponse({ ok: false, error: 'Daemon not running' })
+            } else if (isTikTokYtDlpError) {
+              // Provide a user-friendly message for TikTok transcription failures
+              sendResponse({ ok: false, error: 'No captions available' })
             } else {
               sendResponse({ ok: false, error: message })
             }
