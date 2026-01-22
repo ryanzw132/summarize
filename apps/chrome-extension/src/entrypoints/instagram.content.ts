@@ -1,5 +1,15 @@
 import { defineContentScript } from 'wxt/utils/define-content-script'
 
+// Debug flag - set to true to enable verbose logging for troubleshooting
+const DEBUG = false
+
+// Debug logging helper
+function debugLog(message: string, ...args: unknown[]): void {
+  if (DEBUG) {
+    console.log(`[Instagram Content Script] ${message}`, ...args)
+  }
+}
+
 type InstagramTranscriptRequest = { type: 'instagram-transcript' }
 type InstagramTranscriptResponse =
   | {
@@ -9,7 +19,7 @@ type InstagramTranscriptResponse =
       durationSeconds: number | null
       title: string | null
     }
-  | { ok: false; error: string; reason: 'no_video' | 'extraction_failed' | 'unsupported_url' }
+  | { ok: false; error: string; reason: 'no_video' | 'extraction_failed' | 'unsupported_url' | 'auth_required' | 'blocked' }
 
 type InstagramMetadataRequest = { type: 'instagram-metadata' }
 type InstagramScrollNextRequest = { type: 'instagram-scroll-next' }
@@ -27,6 +37,107 @@ type InstagramMetadataResponse = {
     comments: number | null
     shares: number | null
   }
+}
+
+/**
+ * Check if a URL is a valid Instagram CDN URL
+ */
+function isValidInstagramCdnUrl(url: string): boolean {
+  if (!url || !url.startsWith('https://')) return false
+  return url.includes('cdninstagram.com')
+    || url.includes('fbcdn.net')
+    || url.includes('instagram.com')
+    || url.includes('facebook.com')
+}
+
+/**
+ * Decode escaped URL characters from JSON
+ */
+function decodeJsonUrl(url: string): string {
+  return url
+    .replace(/\\u0026/g, '&')
+    .replace(/\\\//g, '/')
+    .replace(/\\"/g, '"')
+}
+
+/**
+ * Try to get video URL from window.__additionalDataLoaded
+ */
+function extractFromAdditionalData(): string | null {
+  try {
+    const win = window as unknown as { __additionalDataLoaded?: Record<string, unknown> }
+    if (!win.__additionalDataLoaded) return null
+
+    const searchForVideoUrl = (obj: unknown, depth = 0): string | null => {
+      if (depth > 10 || !obj || typeof obj !== 'object') return null
+      const record = obj as Record<string, unknown>
+
+      // Check for video_url
+      if (typeof record.video_url === 'string' && isValidInstagramCdnUrl(record.video_url)) {
+        return record.video_url
+      }
+
+      // Check for video_versions array (highest quality first)
+      if (Array.isArray(record.video_versions) && record.video_versions.length > 0) {
+        for (const version of record.video_versions) {
+          if (version && typeof version === 'object') {
+            const v = version as Record<string, unknown>
+            if (typeof v.url === 'string' && isValidInstagramCdnUrl(v.url)) {
+              return v.url
+            }
+          }
+        }
+      }
+
+      // Recurse
+      for (const key of Object.keys(record)) {
+        const found = searchForVideoUrl(record[key], depth + 1)
+        if (found) return found
+      }
+
+      return null
+    }
+
+    return searchForVideoUrl(win.__additionalDataLoaded)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Search all scripts for GraphQL video data
+ */
+function extractFromGraphQLScripts(): string | null {
+  const scripts = document.querySelectorAll('script')
+
+  for (const script of scripts) {
+    const text = script.textContent || ''
+    if (text.length < 100) continue
+
+    // Multiple patterns for video URLs in different GraphQL formats
+    const patterns = [
+      // Standard video_url
+      /"video_url"\s*:\s*"(https:[^"]+)"/g,
+      // video_versions array
+      /"video_versions"\s*:\s*\[\s*\{\s*"[^"]*"\s*:\s*\d+[^}]*"url"\s*:\s*"(https:[^"]+)"/g,
+      // Alternate format
+      /"playable_url(?:_quality_hd)?"\s*:\s*"(https:[^"]+)"/g,
+      // Direct CDN URL pattern
+      /"url"\s*:\s*"(https:\/\/[^"]*(?:cdninstagram|fbcdn)[^"]+\.mp4[^"]*)"/g,
+    ]
+
+    for (const pattern of patterns) {
+      let match
+      while ((match = pattern.exec(text)) !== null) {
+        const decoded = decodeJsonUrl(match[1])
+        if (isValidInstagramCdnUrl(decoded)) {
+          return decoded
+        }
+      }
+    }
+  }
+
+  return null
 }
 
 /**
@@ -64,9 +175,13 @@ function extractInstagramVideoInfo(): {
     videoUrl = null
   }
 
-  // Try to extract from Instagram's shared data (embedded in page)
+  // Method 1: Try __additionalDataLoaded window object
   if (!videoUrl) {
-    // Look for video URL in page scripts
+    videoUrl = extractFromAdditionalData()
+  }
+
+  // Method 2: Try to extract from Instagram's LD+JSON
+  if (!videoUrl) {
     const scripts = document.querySelectorAll('script[type="application/ld+json"]')
     for (const script of scripts) {
       try {
@@ -75,7 +190,7 @@ function extractInstagramVideoInfo(): {
           contentUrl?: string
           duration?: string
         }
-        if (data['@type'] === 'VideoObject' && data.contentUrl) {
+        if (data['@type'] === 'VideoObject' && data.contentUrl && isValidInstagramCdnUrl(data.contentUrl)) {
           videoUrl = data.contentUrl
           // Parse duration if available (ISO 8601 format like PT30S)
           if (data.duration && !durationSeconds) {
@@ -95,29 +210,18 @@ function extractInstagramVideoInfo(): {
     }
   }
 
-  // Try meta tags
+  // Method 3: Try og:video meta tag
   if (!videoUrl) {
     const ogVideo = document.querySelector('meta[property="og:video"]') as HTMLMetaElement | null
-    videoUrl = ogVideo?.content || null
+    const ogContent = ogVideo?.content || null
+    if (ogContent && isValidInstagramCdnUrl(ogContent)) {
+      videoUrl = ogContent
+    }
   }
 
-  // Fallback: search scripts for direct video URL (GraphQL payloads)
+  // Method 4: Search all scripts for GraphQL video data
   if (!videoUrl) {
-    const scripts = document.querySelectorAll('script')
-    for (const script of scripts) {
-      const text = script.textContent || ''
-      if (!text.includes('video_url')) continue
-      const match = text.match(/"video_url":"(https:\\/\\/[^"]+)"/)
-      if (match?.[1]) {
-        const decoded = match[1]
-          .replace(/\\u0026/g, '&')
-          .replace(/\\\//g, '/')
-        if (decoded.includes('cdninstagram.com') || decoded.includes('fbcdn.net')) {
-          videoUrl = decoded
-          break
-        }
-      }
-    }
+    videoUrl = extractFromGraphQLScripts()
   }
 
   // Get title from page
@@ -461,10 +565,134 @@ function scrollToNextReel(): InstagramScrollNextResponse {
   }
 }
 
+/**
+ * Check if page indicates login is required
+ */
+function isAuthRequired(): boolean {
+  // Check for login wall elements
+  const loginSelectors = [
+    '[data-testid="login-button"]',
+    'input[name="username"]',
+    'a[href*="/accounts/login"]',
+    '[class*="LoginForm"]',
+    '[class*="loginForm"]',
+  ]
+
+  for (const selector of loginSelectors) {
+    if (document.querySelector(selector)) {
+      // Make sure we're not just seeing a login button in the nav
+      const loginForm = document.querySelector('form[action*="login"]')
+        || document.querySelector('[class*="LoginForm"]')
+        || document.querySelector('[class*="loginForm"]')
+      if (loginForm) return true
+    }
+  }
+
+  // Check for "Log in to continue" type messages
+  const pageText = document.body?.textContent?.toLowerCase() || ''
+  const authPhrases = [
+    'log in to see',
+    'log in to continue',
+    'sign up to see',
+    'login required',
+    'create an account',
+  ]
+
+  for (const phrase of authPhrases) {
+    if (pageText.includes(phrase)) {
+      // Verify there's no video element (to avoid false positives)
+      if (!document.querySelector('video')) return true
+    }
+  }
+
+  return false
+}
+
+/**
+ * Check if content is blocked (age-gated, geo-restricted, etc.)
+ */
+function isContentBlocked(): { blocked: boolean; reason?: string } {
+  const pageText = document.body?.textContent?.toLowerCase() || ''
+
+  // Check for common block messages
+  const blockPhrases = [
+    { pattern: 'age-restricted', reason: 'Age-restricted content' },
+    { pattern: 'sensitive content', reason: 'Sensitive content warning' },
+    { pattern: 'content isn\'t available', reason: 'Content not available' },
+    { pattern: 'this content isn\'t available', reason: 'Content not available' },
+    { pattern: 'this page isn\'t available', reason: 'Page not available' },
+    { pattern: 'sorry, this page isn\'t available', reason: 'Page not available' },
+    { pattern: 'this account is private', reason: 'Private account' },
+    { pattern: 'account is private', reason: 'Private account' },
+    { pattern: 'restricted your account', reason: 'Account restricted' },
+    { pattern: 'violates our community guidelines', reason: 'Content removed' },
+    { pattern: 'content has been removed', reason: 'Content removed' },
+    { pattern: 'video has been removed', reason: 'Video removed' },
+    { pattern: 'not available in your', reason: 'Geo-restricted content' },
+  ]
+
+  for (const { pattern, reason } of blockPhrases) {
+    if (pageText.includes(pattern)) {
+      return { blocked: true, reason }
+    }
+  }
+
+  // Check for error page indicators
+  const errorSelectors = [
+    '[data-testid="error-message"]',
+    '[class*="ErrorPage"]',
+    '[class*="errorPage"]',
+    '[class*="NotAvailable"]',
+  ]
+
+  for (const selector of errorSelectors) {
+    if (document.querySelector(selector)) {
+      return { blocked: true, reason: 'Content not available' }
+    }
+  }
+
+  return { blocked: false }
+}
+
 async function extractTranscript(): Promise<InstagramTranscriptResponse> {
+  debugLog('Starting transcript extraction')
+  debugLog('URL:', window.location.href)
+
+  // First check for auth/blocked states before extraction
+  if (isAuthRequired()) {
+    debugLog('Auth required detected')
+    return {
+      ok: false,
+      error: 'Login required to view this Instagram content',
+      reason: 'auth_required',
+    }
+  }
+
+  const blockStatus = isContentBlocked()
+  if (blockStatus.blocked) {
+    debugLog('Content blocked:', blockStatus.reason)
+    return {
+      ok: false,
+      error: blockStatus.reason || 'This content is not available',
+      reason: 'blocked',
+    }
+  }
+
   const { videoUrl, durationSeconds, title } = extractInstagramVideoInfo()
+  debugLog('Extracted video info:', { hasUrl: !!videoUrl, durationSeconds, title })
 
   if (!videoUrl) {
+    // Double-check if it's actually an auth issue we missed
+    if (isAuthRequired()) {
+      debugLog('Auth required detected on second check')
+      return {
+        ok: false,
+        error: 'Login required to view this Instagram content',
+        reason: 'auth_required',
+      }
+    }
+
+    debugLog('No video URL found')
     return {
       ok: false,
       error: 'No downloadable video URL found on this Instagram page',
@@ -473,6 +701,7 @@ async function extractTranscript(): Promise<InstagramTranscriptResponse> {
   }
 
   if (!videoUrl.startsWith('https://')) {
+    debugLog('Non-HTTPS video URL:', videoUrl.substring(0, 50))
     return {
       ok: false,
       error: 'Instagram video URL is not downloadable',
@@ -480,6 +709,7 @@ async function extractTranscript(): Promise<InstagramTranscriptResponse> {
     }
   }
 
+  debugLog('Successfully extracted video URL:', videoUrl.substring(0, 100))
   return {
     ok: true,
     videoUrl,
@@ -496,6 +726,11 @@ export default defineContentScript({
     const flag = '__summarize_instagram_installed__'
     if ((globalThis as unknown as Record<string, unknown>)[flag]) return
     ;(globalThis as unknown as Record<string, unknown>)[flag] = true
+
+    // Announce that content script is ready
+    void chrome.runtime.sendMessage({ type: 'content-script-ready', scriptType: 'instagram' }).catch(() => {
+      // Ignore errors (background may not be ready yet)
+    })
 
     chrome.runtime.onMessage.addListener(
       (

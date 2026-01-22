@@ -1,5 +1,15 @@
 import { defineContentScript } from 'wxt/utils/define-content-script'
 
+// Debug flag - set to true to enable verbose logging for troubleshooting
+const DEBUG = false
+
+// Debug logging helper
+function debugLog(message: string, ...args: unknown[]): void {
+  if (DEBUG) {
+    console.log(`[TikTok Content Script] ${message}`, ...args)
+  }
+}
+
 interface TikTokSubtitleInfo {
   languageCode: string
   url: string
@@ -62,11 +72,15 @@ type TikTokMetadataResponse = {
 }
 
 /**
- * Extract subtitle info from TikTok's `__UNIVERSAL_DATA_FOR_REHYDRATION__` script tag.
+ * Extract subtitle info from TikTok's hydration data.
+ * Searches multiple schema locations for subtitle data.
  */
 function extractTikTokSubtitleInfos(): TikTokSubtitleInfo[] {
   const itemStruct = extractTikTokItemStruct()
-  const subtitleInfos = itemStruct?.video?.subtitleInfos
+  if (!itemStruct?.video) return []
+
+  // Use the helper to find subtitles in various schema locations
+  const subtitleInfos = extractSubtitlesFromVideoObject(itemStruct.video)
   return normalizeSubtitleInfos(subtitleInfos)
 }
 
@@ -165,29 +179,81 @@ function normalizeSubtitleInfos(raw: unknown): TikTokSubtitleInfo[] {
     .map((info) => {
       if (!info || typeof info !== 'object') return null
       const record = info as Record<string, unknown>
+
+      // Try multiple URL keys - TikTok schema varies
       const url =
         (typeof record.Url === 'string' ? record.Url : null) ??
-        (typeof record.url === 'string' ? record.url : null)
+        (typeof record.url === 'string' ? record.url : null) ??
+        (typeof record.playUrl === 'string' ? record.playUrl : null) ??
+        (typeof record.source === 'string' ? record.source : null)
       if (!url) return null
+
+      // Language code variants
       const languageCode =
         (typeof record.LanguageCodeName === 'string' ? record.LanguageCodeName : null) ??
         (typeof record.LanguageID === 'string' ? record.LanguageID : null) ??
         (typeof record.languageCode === 'string' ? record.languageCode : null) ??
         (typeof record.language === 'string' ? record.language : null) ??
+        (typeof record.lang === 'string' ? record.lang : null) ??
+        (typeof record.locale === 'string' ? record.locale : null) ??
         'unknown'
+
+      // URL expiration
       const urlExpire =
         typeof record.UrlExpire === 'number'
           ? record.UrlExpire
           : typeof record.urlExpire === 'number'
             ? record.urlExpire
-            : 0
-      const format =
+            : typeof record.expire === 'number'
+              ? record.expire
+              : 0
+
+      // Format - support webvtt and json
+      let format =
         (typeof record.Format === 'string' ? record.Format : null) ??
         (typeof record.format === 'string' ? record.format : null) ??
+        (typeof record.type === 'string' ? record.type : null) ??
         'webvtt'
+
+      // Normalize format strings
+      format = format.toLowerCase()
+      if (format.includes('vtt') || format.includes('webvtt')) {
+        format = 'webvtt'
+      } else if (format.includes('json')) {
+        format = 'json'
+      }
+
       return { languageCode, url, urlExpire, format }
     })
     .filter((info): info is TikTokSubtitleInfo => Boolean(info))
+}
+
+/**
+ * Extract subtitles from various schema locations in video object
+ */
+function extractSubtitlesFromVideoObject(video: unknown): unknown[] {
+  if (!video || typeof video !== 'object') return []
+  const record = video as Record<string, unknown>
+
+  // Try multiple possible subtitle keys
+  const possibleKeys = [
+    'subtitleInfos',
+    'subtitleInfo',
+    'subTitles',
+    'subtitles',
+    'captions',
+    'captionInfos',
+    'closedCaptions',
+  ]
+
+  for (const key of possibleKeys) {
+    const value = record[key]
+    if (Array.isArray(value) && value.length > 0) {
+      return value
+    }
+  }
+
+  return []
 }
 
 function extractTikTokItemStruct(): TikTokItemStruct | null {
@@ -215,16 +281,44 @@ function extractItemStructFromUniversal(data: unknown): TikTokItemStruct | null 
 
 function extractItemStructFromSigiState(data: unknown): TikTokItemStruct | null {
   if (!data || typeof data !== 'object') return null
-  const itemModule = (data as Record<string, unknown>).ItemModule as Record<string, unknown> | undefined
+  const record = data as Record<string, unknown>
+  const itemModule = record.ItemModule as Record<string, unknown> | undefined
   if (!itemModule || typeof itemModule !== 'object') return null
 
-  const videoId = extractTikTokVideoIdFromUrl()
-  const candidate = videoId ? itemModule[videoId] : null
-  if (candidate && typeof candidate === 'object') {
-    return candidate as TikTokItemStruct
+  // Get video ID from URL or DOM (for FYP/Explore pages)
+  const videoId = getActiveVideoId()
+
+  // Try direct lookup by video ID
+  if (videoId) {
+    const candidate = itemModule[videoId]
+    if (candidate && typeof candidate === 'object') {
+      return candidate as TikTokItemStruct
+    }
   }
 
-  const first = Object.values(itemModule).find((value) => value && typeof value === 'object') as TikTokItemStruct | undefined
+  // Try to find by matching itemStruct.id or video.id
+  for (const [key, value] of Object.entries(itemModule)) {
+    if (!value || typeof value !== 'object') continue
+    const item = value as Record<string, unknown>
+
+    // Check if this item's ID matches
+    const itemId = item.id || item.videoId || (item.video as Record<string, unknown>)?.id
+    if (videoId && itemId === videoId) {
+      return item as TikTokItemStruct
+    }
+
+    // If we have no video ID, return the first valid item
+    if (!videoId && item.video) {
+      return item as TikTokItemStruct
+    }
+  }
+
+  // Last resort: return first item with video data
+  const first = Object.values(itemModule).find((value) => {
+    if (!value || typeof value !== 'object') return false
+    const item = value as Record<string, unknown>
+    return item.video || item.desc !== undefined
+  }) as TikTokItemStruct | undefined
   return first ?? null
 }
 
@@ -238,10 +332,101 @@ function readJsonScript(id: string): unknown | null {
   }
 }
 
+/**
+ * Extract video ID from URL path
+ */
 function extractTikTokVideoIdFromUrl(): string | null {
   const url = window.location.href
   const match = url.match(/\/video\/(\d+)/) || url.match(/\/v\/(\d+)/)
   return match?.[1] ?? null
+}
+
+/**
+ * Extract active video ID from DOM elements on FYP/Explore/Profile pages.
+ * TikTok uses data attributes to identify the active video container.
+ */
+function extractActiveVideoIdFromDOM(): string | null {
+  // Method 1: Look for active video container with data-e2e attributes
+  const activeContainers = [
+    // FYP/Explore active video
+    document.querySelector('[data-e2e="recommend-list-item-container"][class*="active"]'),
+    document.querySelector('[data-e2e="browse-video"][class*="active"]'),
+    document.querySelector('[data-e2e="video-container"][class*="active"]'),
+    // Video player wrapper with video ID
+    document.querySelector('[data-e2e="video-player-container"]'),
+    // Currently playing video (check for playing state)
+    document.querySelector('video[src]:not([src=""])')?.closest('[data-e2e*="video"]'),
+  ]
+
+  for (const container of activeContainers) {
+    if (!container) continue
+
+    // Try to get video ID from data attributes
+    const videoId = container.getAttribute('data-video-id')
+      || container.getAttribute('data-item-id')
+      || container.getAttribute('data-id')
+    if (videoId) return videoId
+
+    // Try to find it in nested elements
+    const nestedWithId = container.querySelector('[data-video-id], [data-item-id], [data-id]')
+    if (nestedWithId) {
+      const id = nestedWithId.getAttribute('data-video-id')
+        || nestedWithId.getAttribute('data-item-id')
+        || nestedWithId.getAttribute('data-id')
+      if (id) return id
+    }
+  }
+
+  // Method 2: Find the video element that's currently visible/playing
+  const videos = document.querySelectorAll('video')
+  for (const video of videos) {
+    // Check if video is playing or has substantial playback
+    if (!video.paused || video.currentTime > 0) {
+      // Walk up to find container with video ID
+      let parent: Element | null = video
+      while (parent) {
+        const id = parent.getAttribute('data-video-id')
+          || parent.getAttribute('data-item-id')
+          || parent.getAttribute('data-id')
+        if (id) return id
+
+        // Also check for ID in class names (TikTok sometimes embeds IDs there)
+        const className = parent.className || ''
+        const classIdMatch = className.match(/video-(\d{15,})/)
+        if (classIdMatch) return classIdMatch[1]
+
+        parent = parent.parentElement
+      }
+    }
+  }
+
+  // Method 3: Parse from any visible video link on the page
+  const videoLinks = document.querySelectorAll('a[href*="/video/"]')
+  for (const link of videoLinks) {
+    const href = link.getAttribute('href') || ''
+    const match = href.match(/\/video\/(\d+)/)
+    if (match) {
+      // Check if this link is in the viewport (likely the active one)
+      const rect = link.getBoundingClientRect()
+      if (rect.top >= 0 && rect.top < window.innerHeight) {
+        return match[1]
+      }
+    }
+  }
+
+  return null
+}
+
+/**
+ * Get the best video ID - from URL first, then from DOM
+ */
+function getActiveVideoId(): string | null {
+  // URL is most reliable when available
+  const urlId = extractTikTokVideoIdFromUrl()
+  if (urlId) return urlId
+
+  // Fall back to DOM extraction for FYP/Explore pages
+  return extractActiveVideoIdFromDOM()
 }
 
 /**
@@ -334,8 +519,65 @@ function parseWebVtt(vtt: string): { text: string; segments: TranscriptSegment[]
 }
 
 /**
+ * Parse JSON transcript format into segments
+ */
+function parseJsonTranscript(json: string): { text: string; segments: TranscriptSegment[] } | null {
+  try {
+    const data = JSON.parse(json)
+
+    // Handle various JSON transcript formats
+    let segments: TranscriptSegment[] = []
+
+    // Format 1: Array of {start, end/duration, text}
+    if (Array.isArray(data)) {
+      segments = data
+        .map((item: unknown) => {
+          if (!item || typeof item !== 'object') return null
+          const record = item as Record<string, unknown>
+
+          const text = typeof record.text === 'string' ? record.text.trim()
+            : typeof record.content === 'string' ? record.content.trim()
+            : typeof record.words === 'string' ? record.words.trim()
+            : null
+          if (!text) return null
+
+          const startMs = typeof record.start === 'number' ? record.start * 1000
+            : typeof record.startTime === 'number' ? record.startTime
+            : typeof record.from === 'number' ? record.from
+            : 0
+
+          const endMs = typeof record.end === 'number' ? record.end * 1000
+            : typeof record.endTime === 'number' ? record.endTime
+            : typeof record.to === 'number' ? record.to
+            : typeof record.duration === 'number' ? startMs + record.duration * 1000
+            : startMs + 3000
+
+          return { startMs, endMs, text }
+        })
+        .filter((seg): seg is TranscriptSegment => seg !== null)
+    }
+    // Format 2: Object with segments/cues array
+    else if (data && typeof data === 'object') {
+      const cues = (data as Record<string, unknown>).segments
+        || (data as Record<string, unknown>).cues
+        || (data as Record<string, unknown>).transcript
+      if (Array.isArray(cues)) {
+        return parseJsonTranscript(JSON.stringify(cues))
+      }
+    }
+
+    if (segments.length === 0) return null
+
+    const text = segments.map(s => s.text).join(' ')
+    return { text, segments }
+  } catch {
+    return null
+  }
+}
+
+/**
  * Fetch and parse TikTok captions from the subtitle URL.
- * Includes a 10-second timeout to prevent hanging on slow/blocked requests.
+ * Supports WebVTT and JSON formats with retry logic.
  */
 async function fetchTikTokCaptions(
   subtitleInfos: TikTokSubtitleInfo[]
@@ -352,28 +594,64 @@ async function fetchTikTokCaptions(
     return null
   }
 
-  const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
+  // Retry logic with cache-busting for stale URLs
+  const maxRetries = 2
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 10000)
 
-  try {
-    const response = await fetch(selectedInfo.url, {
-      headers: {
-        Accept: 'text/vtt, */*',
-      },
-      signal: controller.signal,
-    })
+    try {
+      // Add cache-busting on retry
+      let url = selectedInfo.url
+      if (attempt > 0 && !url.includes('_retry=')) {
+        url += (url.includes('?') ? '&' : '?') + '_retry=' + Date.now()
+      }
 
-    if (!response.ok) {
-      return null
+      const response = await fetch(url, {
+        headers: {
+          Accept: selectedInfo.format === 'json'
+            ? 'application/json, text/plain, */*'
+            : 'text/vtt, text/plain, */*',
+        },
+        signal: controller.signal,
+        cache: 'no-store',
+        credentials: 'include',
+      })
+
+      if (!response.ok) {
+        // If URL might be expired, try next attempt
+        if (response.status === 403 || response.status === 410) {
+          continue
+        }
+        return null
+      }
+
+      const content = await response.text()
+
+      // Parse based on format or auto-detect
+      if (selectedInfo.format === 'json' || content.trim().startsWith('{') || content.trim().startsWith('[')) {
+        const jsonResult = parseJsonTranscript(content)
+        if (jsonResult) return jsonResult
+      }
+
+      // Try WebVTT
+      const vttResult = parseWebVtt(content)
+      if (vttResult) return vttResult
+
+      // If neither worked, try the other format
+      if (selectedInfo.format !== 'json') {
+        const jsonResult = parseJsonTranscript(content)
+        if (jsonResult) return jsonResult
+      }
+
+    } catch {
+      // Continue to next retry
+    } finally {
+      clearTimeout(timeoutId)
     }
-
-    const vttContent = await response.text()
-    return parseWebVtt(vttContent)
-  } catch {
-    return null
-  } finally {
-    clearTimeout(timeoutId)
   }
+
+  return null
 }
 
 /**
@@ -421,10 +699,17 @@ function scrollToNextVideo(): TikTokScrollNextResponse {
 }
 
 async function extractTranscript(): Promise<TikTokTranscriptResponse> {
+  debugLog('Starting transcript extraction')
+  debugLog('URL:', window.location.href)
+
   const subtitleInfos = extractTikTokSubtitleInfos()
   const durationSeconds = extractTikTokDurationSeconds()
 
+  debugLog('Found subtitle infos:', subtitleInfos.length)
+  debugLog('Video duration:', durationSeconds)
+
   if (subtitleInfos.length === 0) {
+    debugLog('No captions found')
     return {
       ok: false,
       error: 'No captions available for this TikTok video',
@@ -432,9 +717,11 @@ async function extractTranscript(): Promise<TikTokTranscriptResponse> {
     }
   }
 
+  debugLog('Fetching captions from:', subtitleInfos.map((s) => ({ lang: s.languageCode, format: s.format })))
   const captions = await fetchTikTokCaptions(subtitleInfos)
 
   if (!captions) {
+    debugLog('Failed to fetch or parse captions')
     return {
       ok: false,
       error: 'Failed to fetch or parse TikTok captions',
@@ -442,6 +729,7 @@ async function extractTranscript(): Promise<TikTokTranscriptResponse> {
     }
   }
 
+  debugLog('Successfully extracted transcript:', { textLength: captions.text.length, segments: captions.segments.length })
   return {
     ok: true,
     text: captions.text,
@@ -458,6 +746,11 @@ export default defineContentScript({
     const flag = '__summarize_tiktok_installed__'
     if ((globalThis as unknown as Record<string, unknown>)[flag]) return
     ;(globalThis as unknown as Record<string, unknown>)[flag] = true
+
+    // Announce that content script is ready
+    void chrome.runtime.sendMessage({ type: 'content-script-ready', scriptType: 'tiktok' }).catch(() => {
+      // Ignore errors (background may not be ready yet)
+    })
 
     chrome.runtime.onMessage.addListener(
       (

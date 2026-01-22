@@ -1,5 +1,15 @@
 import { defineContentScript } from 'wxt/utils/define-content-script'
 
+// Debug flag - set to true to enable verbose logging for troubleshooting
+const DEBUG = false
+
+// Debug logging helper
+function debugLog(message: string, ...args: unknown[]): void {
+  if (DEBUG) {
+    console.log(`[YouTube Content Script] ${message}`, ...args)
+  }
+}
+
 type YouTubeMetadataRequest = { type: 'youtube-metadata' }
 type YouTubeScrollNextRequest = { type: 'youtube-scroll-next' }
 type YouTubeScrollNextResponse = { ok: boolean }
@@ -27,19 +37,34 @@ function isValidNumber(n: unknown): n is number {
 
 /**
  * Parse a number from YouTube's display format (e.g., "1.2M", "500K", "1,234")
+ * Also handles localized formats by stripping non-numeric characters
  */
 function parseYouTubeNumber(text: string | null): number | null {
   if (!text) return null
-  const cleaned = text.replace(/,/g, '').trim().toLowerCase()
-  const match = cleaned.match(/^([\d.]+)\s*([kmb]?)/)
-  if (!match) return null
-  const num = parseFloat(match[1])
-  if (!isValidNumber(num)) return null
-  const suffix = match[2]
-  if (suffix === 'k') return Math.round(num * 1000)
-  if (suffix === 'm') return Math.round(num * 1000000)
-  if (suffix === 'b') return Math.round(num * 1000000000)
-  return Math.round(num)
+
+  // Normalize: remove spaces and convert to lowercase
+  let cleaned = text.trim().toLowerCase()
+
+  // Handle K/M/B suffixes first (before removing separators)
+  const suffixMatch = cleaned.match(/([\d.,\s]+)\s*([kmb])\b/i)
+  if (suffixMatch) {
+    // Remove all non-digit chars except decimal point
+    const numStr = suffixMatch[1].replace(/[^\d.]/g, '')
+    const num = parseFloat(numStr)
+    if (!isValidNumber(num)) return null
+    const suffix = suffixMatch[2].toLowerCase()
+    if (suffix === 'k') return Math.round(num * 1000)
+    if (suffix === 'm') return Math.round(num * 1000000)
+    if (suffix === 'b') return Math.round(num * 1000000000)
+  }
+
+  // Remove all non-digit characters (handles localized number formats)
+  // Keep only digits
+  const digitsOnly = cleaned.replace(/[^\d]/g, '')
+  if (!digitsOnly) return null
+
+  const num = parseInt(digitsOnly, 10)
+  return isValidNumber(num) ? num : null
 }
 
 /**
@@ -53,78 +78,169 @@ function extractHashtags(text: string | null): string[] {
 }
 
 /**
+ * Type for YouTube player response data
+ */
+interface YTPlayerResponse {
+  videoDetails?: {
+    title?: string
+    shortDescription?: string
+    author?: string
+    viewCount?: string
+    lengthSeconds?: string
+  }
+  microformat?: {
+    playerMicroformatRenderer?: {
+      publishDate?: string
+      ownerChannelName?: string
+      viewCount?: string
+      likeCount?: number
+    }
+  }
+}
+
+/**
+ * Try to get ytInitialPlayerResponse from window object or page scripts
+ */
+function getYTPlayerResponse(): YTPlayerResponse | null {
+  // Method 1: Try window object directly (faster and more reliable)
+  try {
+    const win = window as unknown as { ytInitialPlayerResponse?: YTPlayerResponse }
+    if (win.ytInitialPlayerResponse) {
+      return win.ytInitialPlayerResponse
+    }
+  } catch {
+    // Window access failed
+  }
+
+  // Method 2: Parse from script tags
+  const scripts = document.querySelectorAll('script')
+  for (const script of scripts) {
+    const text = script.textContent || ''
+
+    // Try multiple patterns - YouTube's format varies
+    const patterns = [
+      /ytInitialPlayerResponse\s*=\s*(\{.+?\});\s*(?:var|let|const|<\/script>)/s,
+      /ytInitialPlayerResponse\s*=\s*(\{.+?\});/s,
+      /var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\});/s,
+    ]
+
+    for (const pattern of patterns) {
+      const match = text.match(pattern)
+      if (match?.[1]) {
+        try {
+          return JSON.parse(match[1]) as YTPlayerResponse
+        } catch {
+          continue
+        }
+      }
+    }
+  }
+
+  return null
+}
+
+/**
  * Extract metadata from ytInitialPlayerResponse.
  */
 function extractFromPlayerResponse(): Partial<YouTubeMetadataResponse> {
   const result: Partial<YouTubeMetadataResponse> = {}
 
-  // Try to find ytInitialPlayerResponse in page scripts
-  const scripts = document.querySelectorAll('script')
-  for (const script of scripts) {
-    const text = script.textContent || ''
-    const match = text.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/)
-    if (match?.[1]) {
-      try {
-        const data = JSON.parse(match[1]) as {
-          videoDetails?: {
-            title?: string
-            shortDescription?: string
-            author?: string
-            viewCount?: string
-          }
-          microformat?: {
-            playerMicroformatRenderer?: {
-              publishDate?: string
-              ownerChannelName?: string
-            }
-          }
-        }
+  const data = getYTPlayerResponse()
+  if (!data) return result
 
-        if (data.videoDetails) {
-          result.title = data.videoDetails.title || null
-          result.description = data.videoDetails.shortDescription || null
-          result.creator = data.videoDetails.author
-            ? `@${data.videoDetails.author}`
-            : null
-          if (data.videoDetails.viewCount) {
-            const viewCount = parseInt(data.videoDetails.viewCount, 10)
-            if (isValidNumber(viewCount)) {
-              result.stats = result.stats || { views: null, likes: null, comments: null, shares: null }
-              result.stats.views = viewCount
-            }
-          }
-        }
+  if (data.videoDetails) {
+    result.title = data.videoDetails.title || null
+    result.description = data.videoDetails.shortDescription || null
+    result.creator = data.videoDetails.author
+      ? `@${data.videoDetails.author}`
+      : null
 
-        if (data.microformat?.playerMicroformatRenderer) {
-          const micro = data.microformat.playerMicroformatRenderer
-          if (micro.publishDate) {
-            const date = new Date(micro.publishDate)
-            if (!isNaN(date.getTime())) {
-              result.postedAt = date.toLocaleDateString('en-US', {
-                year: 'numeric',
-                month: 'long',
-                day: 'numeric',
-              })
-            }
-          }
-          if (!result.creator && micro.ownerChannelName) {
-            result.creator = `@${micro.ownerChannelName}`
-          }
-        }
-
-        // Extract hashtags from description
-        if (result.description) {
-          result.hashtags = extractHashtags(result.description)
-        }
-
-        break
-      } catch {
-        // Continue to next script
+    if (data.videoDetails.viewCount) {
+      const viewCount = parseInt(data.videoDetails.viewCount, 10)
+      if (isValidNumber(viewCount)) {
+        result.stats = result.stats || { views: null, likes: null, comments: null, shares: null }
+        result.stats.views = viewCount
       }
     }
   }
 
+  if (data.microformat?.playerMicroformatRenderer) {
+    const micro = data.microformat.playerMicroformatRenderer
+    if (micro.publishDate) {
+      const date = new Date(micro.publishDate)
+      if (!isNaN(date.getTime())) {
+        result.postedAt = date.toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric',
+        })
+      }
+    }
+    if (!result.creator && micro.ownerChannelName) {
+      result.creator = `@${micro.ownerChannelName}`
+    }
+
+    // Some responses include like count in microformat
+    if (typeof micro.likeCount === 'number' && isValidNumber(micro.likeCount)) {
+      result.stats = result.stats || { views: null, likes: null, comments: null, shares: null }
+      result.stats.likes = micro.likeCount
+    }
+
+    // Fallback view count from microformat
+    if (micro.viewCount && !result.stats?.views) {
+      const viewCount = parseInt(micro.viewCount, 10)
+      if (isValidNumber(viewCount)) {
+        result.stats = result.stats || { views: null, likes: null, comments: null, shares: null }
+        result.stats.views = viewCount
+      }
+    }
+  }
+
+  // Extract hashtags from description
+  if (result.description) {
+    result.hashtags = extractHashtags(result.description)
+  }
+
   return result
+}
+
+/**
+ * Try to get ytInitialData from window object or page scripts
+ */
+function getYTInitialData(): unknown | null {
+  // Method 1: Try window object directly
+  try {
+    const win = window as unknown as { ytInitialData?: unknown }
+    if (win.ytInitialData) {
+      return win.ytInitialData
+    }
+  } catch {
+    // Window access failed
+  }
+
+  // Method 2: Parse from script tags
+  const scripts = document.querySelectorAll('script')
+  for (const script of scripts) {
+    const text = script.textContent || ''
+    const patterns = [
+      /var\s+ytInitialData\s*=\s*(\{[\s\S]+?\});\s*(?:var|let|const|<\/script>)/,
+      /var\s+ytInitialData\s*=\s*(\{[\s\S]+?\});/,
+      /ytInitialData\s*=\s*(\{[\s\S]+?\});/,
+    ]
+
+    for (const pattern of patterns) {
+      const match = text.match(pattern)
+      if (match?.[1]) {
+        try {
+          return JSON.parse(match[1])
+        } catch {
+          continue
+        }
+      }
+    }
+  }
+
+  return null
 }
 
 /**
@@ -133,67 +249,71 @@ function extractFromPlayerResponse(): Partial<YouTubeMetadataResponse> {
 function extractFromInitialData(): Partial<YouTubeMetadataResponse> {
   const result: Partial<YouTubeMetadataResponse> = {}
 
-  const scripts = document.querySelectorAll('script')
-  for (const script of scripts) {
-    const text = script.textContent || ''
-    const match = text.match(/var\s+ytInitialData\s*=\s*(\{[\s\S]+?\});/)
-    if (match?.[1]) {
-      try {
-        const data = JSON.parse(match[1])
+  const data = getYTInitialData()
+  if (!data || typeof data !== 'object') return result
 
-        // Navigate to engagement panel for stats (structure varies)
-        // Try to find view count in various locations
-        const findViewCount = (obj: unknown, depth = 0): string | null => {
-          if (depth > 10 || !obj || typeof obj !== 'object') return null
-          const o = obj as Record<string, unknown>
+  // Helper to find a value by key in nested objects
+  const findValue = (obj: unknown, targetKey: string, depth = 0): unknown => {
+    if (depth > 15 || !obj || typeof obj !== 'object') return null
+    const o = obj as Record<string, unknown>
 
-          // Check for viewCount text
-          if (typeof o.viewCount === 'object' && o.viewCount !== null) {
-            const vc = o.viewCount as Record<string, unknown>
-            if (typeof vc.simpleText === 'string') return vc.simpleText
-            if (typeof vc.runs === 'object' && Array.isArray(vc.runs)) {
-              const texts = (vc.runs as Array<{ text?: string }>)
-                .map(r => r.text || '')
-                .join('')
-              if (texts) return texts
-            }
-          }
+    if (targetKey in o) return o[targetKey]
 
-          // Check for viewCountText
-          if (typeof o.viewCountText === 'object' && o.viewCountText !== null) {
-            const vct = o.viewCountText as Record<string, unknown>
-            if (typeof vct.simpleText === 'string') return vct.simpleText
-            if (typeof vct.runs === 'object' && Array.isArray(vct.runs)) {
-              const texts = (vct.runs as Array<{ text?: string }>)
-                .map(r => r.text || '')
-                .join('')
-              if (texts) return texts
-            }
-          }
+    for (const key of Object.keys(o)) {
+      if (typeof o[key] === 'object' && o[key] !== null) {
+        const found = findValue(o[key], targetKey, depth + 1)
+        if (found !== null) return found
+      }
+    }
 
-          // Recurse into object
-          for (const key of Object.keys(o)) {
-            if (typeof o[key] === 'object' && o[key] !== null) {
-              const found = findViewCount(o[key], depth + 1)
-              if (found) return found
-            }
-          }
+    return null
+  }
 
-          return null
-        }
+  // Helper to extract text from YouTube's text format
+  const extractText = (textObj: unknown): string | null => {
+    if (!textObj || typeof textObj !== 'object') return null
+    const o = textObj as Record<string, unknown>
+    if (typeof o.simpleText === 'string') return o.simpleText
+    if (Array.isArray(o.runs)) {
+      return (o.runs as Array<{ text?: string }>).map(r => r.text || '').join('')
+    }
+    return null
+  }
 
-        const viewCountText = findViewCount(data)
-        if (viewCountText) {
-          const viewMatch = viewCountText.match(/([\d,.]+[KMB]?)\s*views?/i)
-          if (viewMatch) {
-            result.stats = result.stats || { views: null, likes: null, comments: null, shares: null }
-            result.stats.views = parseYouTubeNumber(viewMatch[1])
-          }
-        }
+  // Find view count
+  const viewCountObj = findValue(data, 'viewCount') || findValue(data, 'viewCountText')
+  const viewCountText = extractText(viewCountObj)
+  if (viewCountText) {
+    const viewMatch = viewCountText.match(/([\d,.]+[KMB]?)\s*views?/i)
+      || viewCountText.match(/^([\d,.]+[KMB]?)$/)
+    if (viewMatch) {
+      result.stats = result.stats || { views: null, likes: null, comments: null, shares: null }
+      result.stats.views = parseYouTubeNumber(viewMatch[1])
+    }
+  }
 
-        break
-      } catch {
-        // Continue to next script
+  // Find like count (for Shorts)
+  const likeCountObj = findValue(data, 'likeCount') || findValue(data, 'likeCountText')
+  const likeCountText = extractText(likeCountObj)
+  if (likeCountText) {
+    const likeMatch = likeCountText.match(/([\d,.]+[KMB]?)/i)
+    if (likeMatch) {
+      result.stats = result.stats || { views: null, likes: null, comments: null, shares: null }
+      if (!result.stats.likes) {
+        result.stats.likes = parseYouTubeNumber(likeMatch[1])
+      }
+    }
+  }
+
+  // Find comment count
+  const commentCountObj = findValue(data, 'commentCount') || findValue(data, 'commentCountText')
+  const commentCountText = extractText(commentCountObj)
+  if (commentCountText) {
+    const commentMatch = commentCountText.match(/([\d,.]+[KMB]?)/i)
+    if (commentMatch) {
+      result.stats = result.stats || { views: null, likes: null, comments: null, shares: null }
+      if (!result.stats.comments) {
+        result.stats.comments = parseYouTubeNumber(commentMatch[1])
       }
     }
   }
@@ -335,24 +455,20 @@ function scrollToNextShort(): YouTubeScrollNextResponse {
  * Extract video metadata from YouTube page.
  */
 function extractYouTubeMetadata(): YouTubeMetadataResponse {
-  const emptyResponse: YouTubeMetadataResponse = {
-    title: null,
-    description: null,
-    creator: null,
-    postedAt: null,
-    hashtags: [],
-    platform: 'youtube',
-    stats: { views: null, likes: null, comments: null, shares: null },
-  }
+  debugLog('Starting metadata extraction')
+  debugLog('URL:', window.location.href)
 
   // Get data from player response
   const playerData = extractFromPlayerResponse()
+  debugLog('Player response data:', { hasTitle: !!playerData.title, hasStats: !!playerData.stats })
 
   // Get data from initial data (mainly for Shorts)
   const initialData = extractFromInitialData()
+  debugLog('Initial data:', { hasStats: !!initialData.stats })
 
   // Get stats from DOM
   const domStats = extractStatsFromDOM()
+  debugLog('DOM stats:', domStats)
 
   // Merge all sources
   const result: YouTubeMetadataResponse = {
@@ -385,6 +501,7 @@ function extractYouTubeMetadata(): YouTubeMetadataResponse {
     }
   }
 
+  debugLog('Final result:', { title: result.title, stats: result.stats })
   return result
 }
 
@@ -395,6 +512,11 @@ export default defineContentScript({
     const flag = '__summarize_youtube_installed__'
     if ((globalThis as unknown as Record<string, unknown>)[flag]) return
     ;(globalThis as unknown as Record<string, unknown>)[flag] = true
+
+    // Announce that content script is ready
+    void chrome.runtime.sendMessage({ type: 'content-script-ready', scriptType: 'youtube' }).catch(() => {
+      // Ignore errors (background may not be ready yet)
+    })
 
     chrome.runtime.onMessage.addListener(
       (

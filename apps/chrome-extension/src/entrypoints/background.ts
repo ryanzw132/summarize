@@ -192,6 +192,27 @@ const MIN_CHAT_CHARS = 100
 const CHAT_FULL_TRANSCRIPT_MAX_CHARS = Number.MAX_SAFE_INTEGER
 const MAX_SLIDE_OCR_CHARS = 8000
 
+// Content script ready cache - tracks which tabs have content scripts loaded
+// Key: tabId, Value: Set of script types that are ready (e.g., 'tiktok', 'instagram', 'youtube', 'extract')
+const contentScriptReadyCache = new Map<number, Set<string>>()
+
+function markContentScriptReady(tabId: number, scriptType: string): void {
+  let scripts = contentScriptReadyCache.get(tabId)
+  if (!scripts) {
+    scripts = new Set()
+    contentScriptReadyCache.set(tabId, scripts)
+  }
+  scripts.add(scriptType)
+}
+
+function isContentScriptReady(tabId: number, scriptType: string): boolean {
+  return contentScriptReadyCache.get(tabId)?.has(scriptType) ?? false
+}
+
+function clearContentScriptCache(tabId: number): void {
+  contentScriptReadyCache.delete(tabId)
+}
+
 const formatSlideTimestamp = (seconds: number): string => {
   const safe = Math.max(0, Math.floor(seconds))
   const h = Math.floor(safe / 3600)
@@ -2184,6 +2205,17 @@ export default defineBackground(() => {
       }
 
       const type = (raw as { type: string }).type
+
+      // Handle content script ready announcements
+      if (type === 'content-script-ready') {
+        const msg = raw as { type: 'content-script-ready'; scriptType: string }
+        const tabId = sender.tab?.id
+        if (tabId && msg.scriptType) {
+          markContentScriptReady(tabId, msg.scriptType)
+        }
+        return false // Sync response, no need to keep channel open
+      }
+
       if (type === 'automation:native-input') {
         const msg = raw as NativeInputRequest
         void (async () => {
@@ -2347,6 +2379,12 @@ export default defineBackground(() => {
             const isTikTok = /tiktok\.com/i.test(url)
             const isInstagram = /instagram\.com/i.test(url)
 
+            // Helper to get script type from file path (e.g., 'content-scripts/tiktok.js' -> 'tiktok')
+            const getScriptType = (scriptFile: string): string => {
+              const match = scriptFile.match(/content-scripts\/(\w+)\.js$/)
+              return match ? match[1] : scriptFile
+            }
+
             // Helper to try injecting content script
             const tryInjectContentScript = async (scriptFile: string): Promise<boolean> => {
               try {
@@ -2355,6 +2393,8 @@ export default defineBackground(() => {
                   files: [scriptFile],
                 })
                 await new Promise((r) => setTimeout(r, 100))
+                // Mark as ready after successful injection
+                markContentScriptReady(tabId, getScriptType(scriptFile))
                 return true
               } catch {
                 return false
@@ -2362,20 +2402,37 @@ export default defineBackground(() => {
             }
 
             // Helper to send message with retry after injection
+            // Uses content script ready cache to skip unnecessary injection attempts
             const sendMessageWithRetry = async <T>(
               messageType: string,
               scriptFile: string
             ): Promise<T | null> => {
+              const scriptType = getScriptType(scriptFile)
+              const alreadyReady = isContentScriptReady(tabId, scriptType)
+
               try {
                 const response = await chrome.tabs.sendMessage(tabId, { type: messageType }) as T
+                // Mark as ready on successful message (in case cache was cleared)
+                if (!alreadyReady) markContentScriptReady(tabId, scriptType)
                 return response
               } catch {
-                // Content script not ready, try to inject
-                if (await tryInjectContentScript(scriptFile)) {
+                // Content script not ready, try to inject (unless we thought it was ready)
+                if (!alreadyReady && await tryInjectContentScript(scriptFile)) {
                   try {
                     return await chrome.tabs.sendMessage(tabId, { type: messageType }) as T
                   } catch {
                     return null
+                  }
+                }
+                // If we thought it was ready but message failed, clear cache and try injection
+                if (alreadyReady) {
+                  clearContentScriptCache(tabId)
+                  if (await tryInjectContentScript(scriptFile)) {
+                    try {
+                      return await chrome.tabs.sendMessage(tabId, { type: messageType }) as T
+                    } catch {
+                      return null
+                    }
                   }
                 }
                 return null
@@ -2693,10 +2750,16 @@ export default defineBackground(() => {
     void summarizeActiveTab(session, 'tab-activated')
   })
 
-  chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     const windowId = tab?.windowId
     if (typeof windowId !== 'number') return
     const session = getPanelSession(windowId)
+
+    // Clear content script cache on URL change (navigation)
+    if (typeof changeInfo.url === 'string') {
+      clearContentScriptCache(tabId)
+    }
+
     if (!session) return
     if (typeof changeInfo.title === 'string' || typeof changeInfo.url === 'string') {
       void emitState(session, '')
@@ -2715,6 +2778,7 @@ export default defineBackground(() => {
     lastMediaProbeByTab.delete(tabId)
     hoverControllersByTabId.delete(tabId)
     panelCacheByTabId.delete(tabId)
+    clearContentScriptCache(tabId)
   })
 
   // Chrome: Auto-open side panel on toolbar icon click

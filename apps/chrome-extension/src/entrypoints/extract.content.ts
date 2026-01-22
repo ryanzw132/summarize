@@ -149,6 +149,11 @@ export default defineContentScript({
     if ((globalThis as unknown as Record<string, unknown>)[flag]) return
     ;(globalThis as unknown as Record<string, unknown>)[flag] = true
 
+    // Announce that content script is ready
+    void chrome.runtime.sendMessage({ type: 'content-script-ready', scriptType: 'extract' }).catch(() => {
+      // Ignore errors (background may not be ready yet)
+    })
+
     chrome.runtime.onMessage.addListener(
       (
         message: ExtractRequest | SeekRequest,
