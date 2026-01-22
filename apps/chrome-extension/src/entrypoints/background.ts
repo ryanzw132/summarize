@@ -2565,18 +2565,21 @@ export default defineBackground(() => {
               }
             }
 
+            let jsonTimeoutId: ReturnType<typeof setTimeout> | null = null
             try {
               const jsonPromise = daemonResponse.json()
-              let jsonTimeoutId: ReturnType<typeof setTimeout> | undefined
               const timeoutPromise = new Promise<never>((_, reject) => {
                 jsonTimeoutId = setTimeout(() => reject(new Error('JSON parsing timed out')), 15000)
               })
               data = await Promise.race([jsonPromise, timeoutPromise]) as typeof data
-              clearTimeout(jsonTimeoutId)
               console.log('[Transcript Button BG] JSON parsed, ok:', data.ok)
             } catch (parseErr) {
               console.error('[Transcript Button BG] JSON parse error:', parseErr)
               throw new Error('Failed to parse response')
+            } finally {
+              if (jsonTimeoutId) {
+                clearTimeout(jsonTimeoutId)
+              }
             }
 
             if (!data.ok) {

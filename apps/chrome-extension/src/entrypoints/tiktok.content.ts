@@ -77,10 +77,18 @@ type TikTokMetadataResponse = {
  */
 function extractTikTokSubtitleInfos(): TikTokSubtitleInfo[] {
   const itemStruct = extractTikTokItemStruct()
-  if (!itemStruct?.video) return []
+  if (!itemStruct) return []
 
   // Use the helper to find subtitles in various schema locations
-  const subtitleInfos = extractSubtitlesFromVideoObject(itemStruct.video)
+  let subtitleInfos: unknown[] = itemStruct.video
+    ? extractSubtitlesFromVideoObject(itemStruct.video)
+    : []
+
+  if (subtitleInfos.length === 0) {
+    // Fallback: sometimes subtitles live at the itemStruct level
+    subtitleInfos = extractSubtitlesFromVideoObject(itemStruct as unknown)
+  }
+
   return normalizeSubtitleInfos(subtitleInfos)
 }
 
@@ -158,13 +166,60 @@ function extractTikTokMetadata(): TikTokMetadataResponse {
 
     // Extract stats (with NaN validation)
     const statsData = itemStruct.stats
-    const isValidNumber = (n: unknown): n is number =>
-      typeof n === 'number' && Number.isFinite(n) && n >= 0
+    const parseCount = (value: unknown): number | null => {
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return value
+      if (typeof value === 'string') {
+        const cleaned = value.trim().toLowerCase()
+        const normalizeCompactNumber = (raw: string): string => {
+          const compact = raw.replace(/[\s\u00a0]/g, '')
+          const hasComma = compact.includes(',')
+          const hasDot = compact.includes('.')
+          if (hasComma && hasDot) {
+            const lastComma = compact.lastIndexOf(',')
+            const lastDot = compact.lastIndexOf('.')
+            const decimalIndex = Math.max(lastComma, lastDot)
+            const integerPart = compact.slice(0, decimalIndex).replace(/[.,]/g, '')
+            const fractionalPart = compact.slice(decimalIndex + 1).replace(/[.,]/g, '')
+            return `${integerPart}.${fractionalPart}`
+          }
+          if (hasComma) {
+            const parts = compact.split(',')
+            if (parts.length === 2 && parts[1].length <= 2) {
+              return `${parts[0]}.${parts[1]}`
+            }
+            return compact.replace(/,/g, '')
+          }
+          if (hasDot) {
+            const parts = compact.split('.')
+            if (parts.length > 2) {
+              return compact.replace(/\./g, '')
+            }
+          }
+          return compact
+        }
+
+        const suffixMatch = cleaned.match(/([\d.,\s]+)\s*([kmb])\b/i)
+        if (suffixMatch) {
+          const num = Number.parseFloat(normalizeCompactNumber(suffixMatch[1]))
+          if (!Number.isFinite(num) || num < 0) return null
+          const suffix = suffixMatch[2].toLowerCase()
+          if (suffix === 'k') return Math.round(num * 1000)
+          if (suffix === 'm') return Math.round(num * 1000000)
+          if (suffix === 'b') return Math.round(num * 1000000000)
+        }
+
+        const digitsOnly = normalizeCompactNumber(cleaned).replace(/[^\d]/g, '')
+        if (!digitsOnly) return null
+        const parsed = Number.parseInt(digitsOnly, 10)
+        return Number.isFinite(parsed) ? parsed : null
+      }
+      return null
+    }
     const stats = {
-      views: isValidNumber(statsData?.playCount) ? statsData.playCount : null,
-      likes: isValidNumber(statsData?.diggCount) ? statsData.diggCount : null,
-      comments: isValidNumber(statsData?.commentCount) ? statsData.commentCount : null,
-      shares: isValidNumber(statsData?.shareCount) ? statsData.shareCount : null,
+      views: parseCount(statsData?.playCount),
+      likes: parseCount(statsData?.diggCount),
+      comments: parseCount(statsData?.commentCount),
+      shares: parseCount(statsData?.shareCount),
     }
 
     return { title, description, creator, postedAt, hashtags, platform: 'tiktok', stats }
@@ -199,14 +254,23 @@ function normalizeSubtitleInfos(raw: unknown): TikTokSubtitleInfo[] {
         'unknown'
 
       // URL expiration
-      const urlExpire =
-        typeof record.UrlExpire === 'number'
+      const urlExpireRaw =
+        (typeof record.UrlExpire === 'number' || typeof record.UrlExpire === 'string')
           ? record.UrlExpire
-          : typeof record.urlExpire === 'number'
+          : (typeof record.urlExpire === 'number' || typeof record.urlExpire === 'string')
             ? record.urlExpire
-            : typeof record.expire === 'number'
+            : (typeof record.expire === 'number' || typeof record.expire === 'string')
               ? record.expire
               : 0
+      let urlExpire = typeof urlExpireRaw === 'string'
+        ? Number.parseInt(urlExpireRaw, 10)
+        : urlExpireRaw
+      if (!Number.isFinite(urlExpire)) {
+        urlExpire = 0
+      } else if (urlExpire > 1_000_000_000_000) {
+        // Convert ms to seconds if needed
+        urlExpire = Math.floor(urlExpire / 1000)
+      }
 
       // Format - support webvtt and json
       let format =
@@ -448,12 +512,12 @@ function parseWebVtt(vtt: string): { text: string; segments: TranscriptSegment[]
 
     // Check for timestamp line (HH:MM:SS.mmm format)
     const timestampMatch = line.match(
-      /^(\d{1,2}):(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[.,](\d{3})/
+      /^(\d{1,2}):(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[.,](\d{3})(?:\s+.*)?$/
     )
     if (!timestampMatch) {
       // Also try MM:SS.mmm format
       const shortMatch = line.match(
-        /^(\d{1,2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{1,2}):(\d{2})[.,](\d{3})/
+        /^(\d{1,2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{1,2}):(\d{2})[.,](\d{3})(?:\s+.*)?$/
       )
       if (shortMatch) {
         const startMs =
@@ -516,6 +580,27 @@ function parseWebVtt(vtt: string): { text: string; segments: TranscriptSegment[]
     text: textParts.join(' '),
     segments,
   }
+}
+
+function isEnglishSubtitle(languageCode: string): boolean {
+  const lower = languageCode.toLowerCase()
+  return lower === 'eng'
+    || lower.startsWith('en')
+    || lower.includes('english')
+}
+
+function selectBestSubtitleInfo(subtitleInfos: TikTokSubtitleInfo[]): TikTokSubtitleInfo | null {
+  if (!Array.isArray(subtitleInfos) || subtitleInfos.length === 0) return null
+
+  const nowSeconds = Math.floor(Date.now() / 1000)
+  const nonExpired = subtitleInfos.filter((info) => {
+    if (!info.urlExpire || info.urlExpire <= 0) return true
+    return info.urlExpire > nowSeconds + 5
+  })
+  const candidates = nonExpired.length > 0 ? nonExpired : subtitleInfos
+
+  const englishInfo = candidates.find((info) => isEnglishSubtitle(info.languageCode))
+  return englishInfo ?? candidates[0] ?? null
 }
 
 /**
@@ -582,13 +667,7 @@ function parseJsonTranscript(json: string): { text: string; segments: Transcript
 async function fetchTikTokCaptions(
   subtitleInfos: TikTokSubtitleInfo[]
 ): Promise<{ text: string; segments: TranscriptSegment[] } | null> {
-  // Prefer English, then fall back to first available
-  const englishInfo = subtitleInfos.find(
-    (info) =>
-      info.languageCode.toLowerCase().startsWith('en') ||
-      info.languageCode.toLowerCase() === 'eng'
-  )
-  const selectedInfo = englishInfo ?? subtitleInfos[0]
+  const selectedInfo = selectBestSubtitleInfo(subtitleInfos)
 
   if (!selectedInfo?.url) {
     return null

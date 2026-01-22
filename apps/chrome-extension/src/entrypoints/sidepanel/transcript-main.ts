@@ -179,9 +179,20 @@ async function fetchWithTimeout(
 
   // Combine caller's signal (if any) with our timeout signal
   const callerSignal = options.signal
-  const combinedSignal = callerSignal
-    ? AbortSignal.any([callerSignal, timeoutController.signal])
-    : timeoutController.signal
+  let combinedSignal: AbortSignal = timeoutController.signal
+  let onCallerAbort: (() => void) | null = null
+  if (callerSignal) {
+    if (typeof AbortSignal.any === 'function') {
+      combinedSignal = AbortSignal.any([callerSignal, timeoutController.signal])
+    } else {
+      if (callerSignal.aborted) {
+        timeoutController.abort()
+      } else {
+        onCallerAbort = () => timeoutController.abort()
+        callerSignal.addEventListener('abort', onCallerAbort, { once: true })
+      }
+    }
+  }
 
   try {
     console.log('[Transcript] Starting fetch to', url)
@@ -209,6 +220,10 @@ async function fetchWithTimeout(
       }
     }
     throw err
+  } finally {
+    if (onCallerAbort && callerSignal) {
+      callerSignal.removeEventListener('abort', onCallerAbort)
+    }
   }
 }
 
@@ -739,18 +754,21 @@ async function fetchTranscript() {
       }
     }
 
+    let jsonTimeoutId: ReturnType<typeof setTimeout> | null = null
     try {
       const jsonPromise = response.json()
-      let jsonTimeoutId: ReturnType<typeof setTimeout> | undefined
       const timeoutPromise = new Promise<never>((_, reject) => {
         jsonTimeoutId = setTimeout(() => reject(new Error('JSON parsing timed out')), 15000)
       })
       data = await Promise.race([jsonPromise, timeoutPromise]) as typeof data
-      clearTimeout(jsonTimeoutId)
       console.log('[Transcript] JSON parsed successfully, ok:', data.ok)
     } catch (parseErr) {
       console.error('[Transcript] JSON parse error:', parseErr)
       throw new Error('Failed to parse daemon response: ' + (parseErr instanceof Error ? parseErr.message : 'unknown'))
+    } finally {
+      if (jsonTimeoutId) {
+        clearTimeout(jsonTimeoutId)
+      }
     }
 
     // Check for stale fetch after parsing response

@@ -54,6 +54,14 @@ function isValidInstagramCdnUrl(url: string): boolean {
  * Decode escaped URL characters from JSON
  */
 function decodeJsonUrl(url: string): string {
+  if (!url) return url
+  try {
+    if (url.includes('\\')) {
+      return JSON.parse(`"${url.replace(/"/g, '\\"')}"`) as string
+    }
+  } catch {
+    // Fall through to manual replacement.
+  }
   return url
     .replace(/\\u0026/g, '&')
     .replace(/\\\//g, '/')
@@ -257,10 +265,39 @@ function isValidNumber(n: unknown): n is number {
  */
 function parseInstagramNumber(text: string | null): number | null {
   if (!text) return null
-  const cleaned = text.replace(/,/g, '').trim().toLowerCase()
-  const match = cleaned.match(/^([\d.]+)\s*([kmb]?)/)
+  const cleaned = text.trim().toLowerCase()
+
+  const normalizeCompactNumber = (value: string): string => {
+    const compact = value.replace(/[\s\u00a0]/g, '')
+    const hasComma = compact.includes(',')
+    const hasDot = compact.includes('.')
+    if (hasComma && hasDot) {
+      const lastComma = compact.lastIndexOf(',')
+      const lastDot = compact.lastIndexOf('.')
+      const decimalIndex = Math.max(lastComma, lastDot)
+      const integerPart = compact.slice(0, decimalIndex).replace(/[.,]/g, '')
+      const fractionalPart = compact.slice(decimalIndex + 1).replace(/[.,]/g, '')
+      return `${integerPart}.${fractionalPart}`
+    }
+    if (hasComma) {
+      const parts = compact.split(',')
+      if (parts.length === 2 && parts[1].length <= 2) {
+        return `${parts[0]}.${parts[1]}`
+      }
+      return compact.replace(/,/g, '')
+    }
+    if (hasDot) {
+      const parts = compact.split('.')
+      if (parts.length > 2) {
+        return compact.replace(/\./g, '')
+      }
+    }
+    return compact
+  }
+
+  const match = cleaned.match(/^([\d.,\s]+)\s*([kmb]?)/)
   if (!match) return null
-  const num = parseFloat(match[1])
+  const num = parseFloat(normalizeCompactNumber(match[1]))
   if (!isValidNumber(num)) return null
   const suffix = match[2]
   if (suffix === 'k') return Math.round(num * 1000)

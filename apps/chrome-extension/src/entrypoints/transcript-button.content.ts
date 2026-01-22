@@ -100,10 +100,10 @@ const ERROR_ICON = `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
 
 /**
  * Copy text to clipboard with multiple fallbacks.
- * Tries: 1) Clipboard API, 2) execCommand with visible textarea, 3) Background script
+ * Tries: 1) Clipboard API, 2) execCommand with textarea, 3) Background script, 4) Input element fallback
  */
 async function copyToClipboard(text: string): Promise<void> {
-  // Try modern Clipboard API first
+  // Try modern Clipboard API first (works best when in user activation context)
   try {
     await navigator.clipboard.writeText(text)
     console.log('[Transcript Button] Copied via Clipboard API')
@@ -112,39 +112,16 @@ async function copyToClipboard(text: string): Promise<void> {
     console.log('[Transcript Button] Clipboard API failed, trying execCommand:', clipboardError)
   }
 
-  // Fallback 1: use textarea + execCommand with better visibility/focus handling
-  const textarea = document.createElement('textarea')
-  textarea.value = text
-  // Make it minimally visible but still in the document flow for execCommand to work
-  textarea.style.position = 'fixed'
-  textarea.style.left = '0'
-  textarea.style.top = '0'
-  textarea.style.width = '1px'
-  textarea.style.height = '1px'
-  textarea.style.padding = '0'
-  textarea.style.border = 'none'
-  textarea.style.outline = 'none'
-  textarea.style.boxShadow = 'none'
-  textarea.style.background = 'transparent'
-  textarea.style.color = 'transparent'
-  textarea.style.zIndex = '2147483647'
-  document.body.appendChild(textarea)
-
+  // Fallback 1: use textarea + execCommand
+  // Some sites block clipboard API but allow execCommand
   try {
-    // Focus and select
-    textarea.focus()
-    textarea.select()
-    textarea.setSelectionRange(0, text.length)
-
-    const success = document.execCommand('copy')
+    const success = await execCommandCopy(text)
     if (success) {
       console.log('[Transcript Button] Copied via execCommand')
       return
     }
   } catch (e) {
     console.log('[Transcript Button] execCommand failed:', e)
-  } finally {
-    document.body.removeChild(textarea)
   }
 
   // Fallback 2: Ask background script to copy via offscreen document
@@ -159,13 +136,102 @@ async function copyToClipboard(text: string): Promise<void> {
       console.log('[Transcript Button] Copied via background script')
       return
     }
-    throw new Error(response?.error || 'Background clipboard failed')
+    console.log('[Transcript Button] Background clipboard response:', response)
   } catch (bgError) {
     console.log('[Transcript Button] Background clipboard failed:', bgError)
   }
 
+  // Fallback 3: Try with input element instead of textarea
+  // Some browsers handle input elements differently
+  try {
+    const success = await execCommandCopyWithInput(text)
+    if (success) {
+      console.log('[Transcript Button] Copied via input element')
+      return
+    }
+  } catch (e) {
+    console.log('[Transcript Button] Input element copy failed:', e)
+  }
+
   // All methods failed - throw error
   throw new Error('All clipboard methods failed')
+}
+
+/**
+ * Copy using execCommand with a textarea element
+ */
+function execCommandCopy(text: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const textarea = document.createElement('textarea')
+    textarea.value = text
+    // Position off-screen but still render it (required for execCommand)
+    textarea.style.cssText = `
+      position: fixed;
+      left: -9999px;
+      top: 0;
+      width: 100px;
+      height: 100px;
+      opacity: 0.01;
+      pointer-events: none;
+      z-index: 2147483647;
+    `
+    textarea.setAttribute('readonly', '')
+    textarea.setAttribute('contenteditable', 'true')
+    document.body.appendChild(textarea)
+
+    // Use setTimeout to ensure the element is rendered
+    setTimeout(() => {
+      try {
+        textarea.focus()
+        textarea.select()
+        textarea.setSelectionRange(0, text.length)
+
+        const success = document.execCommand('copy')
+        document.body.removeChild(textarea)
+        resolve(success)
+      } catch {
+        document.body.removeChild(textarea)
+        resolve(false)
+      }
+    }, 10)
+  })
+}
+
+/**
+ * Copy using execCommand with an input element (alternative fallback)
+ */
+function execCommandCopyWithInput(text: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const input = document.createElement('input')
+    input.type = 'text'
+    input.value = text
+    input.style.cssText = `
+      position: fixed;
+      left: -9999px;
+      top: 0;
+      width: 100px;
+      opacity: 0.01;
+      pointer-events: none;
+      z-index: 2147483647;
+    `
+    input.setAttribute('readonly', '')
+    document.body.appendChild(input)
+
+    setTimeout(() => {
+      try {
+        input.focus()
+        input.select()
+        input.setSelectionRange(0, text.length)
+
+        const success = document.execCommand('copy')
+        document.body.removeChild(input)
+        resolve(success)
+      } catch {
+        document.body.removeChild(input)
+        resolve(false)
+      }
+    }, 10)
+  })
 }
 
 let button: HTMLButtonElement | null = null

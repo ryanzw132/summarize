@@ -43,13 +43,41 @@ function parseYouTubeNumber(text: string | null): number | null {
   if (!text) return null
 
   // Normalize: remove spaces and convert to lowercase
-  let cleaned = text.trim().toLowerCase()
+  const cleaned = text.trim().toLowerCase()
+
+  const normalizeCompactNumber = (value: string): string => {
+    const compact = value.replace(/[\s\u00a0]/g, '')
+    const hasComma = compact.includes(',')
+    const hasDot = compact.includes('.')
+    if (hasComma && hasDot) {
+      const lastComma = compact.lastIndexOf(',')
+      const lastDot = compact.lastIndexOf('.')
+      const decimalIndex = Math.max(lastComma, lastDot)
+      const integerPart = compact.slice(0, decimalIndex).replace(/[.,]/g, '')
+      const fractionalPart = compact.slice(decimalIndex + 1).replace(/[.,]/g, '')
+      return `${integerPart}.${fractionalPart}`
+    }
+    if (hasComma) {
+      const parts = compact.split(',')
+      if (parts.length === 2 && parts[1].length <= 2) {
+        return `${parts[0]}.${parts[1]}`
+      }
+      return compact.replace(/,/g, '')
+    }
+    if (hasDot) {
+      const parts = compact.split('.')
+      if (parts.length > 2) {
+        return compact.replace(/\./g, '')
+      }
+    }
+    return compact
+  }
 
   // Handle K/M/B suffixes first (before removing separators)
   const suffixMatch = cleaned.match(/([\d.,\s]+)\s*([kmb])\b/i)
   if (suffixMatch) {
     // Remove all non-digit chars except decimal point
-    const numStr = suffixMatch[1].replace(/[^\d.]/g, '')
+    const numStr = normalizeCompactNumber(suffixMatch[1])
     const num = parseFloat(numStr)
     if (!isValidNumber(num)) return null
     const suffix = suffixMatch[2].toLowerCase()
@@ -60,7 +88,7 @@ function parseYouTubeNumber(text: string | null): number | null {
 
   // Remove all non-digit characters (handles localized number formats)
   // Keep only digits
-  const digitsOnly = cleaned.replace(/[^\d]/g, '')
+  const digitsOnly = normalizeCompactNumber(cleaned).replace(/[^\d]/g, '')
   if (!digitsOnly) return null
 
   const num = parseInt(digitsOnly, 10)
