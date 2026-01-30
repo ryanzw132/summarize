@@ -315,9 +315,52 @@ function parseInstagramNumber(text: string | null): number | null {
 function extractStatsFromDOM(): { views: number | null; likes: number | null; comments: number | null; shares: number | null } {
   const stats = { views: null as number | null, likes: null as number | null, comments: null as number | null, shares: null as number | null }
 
-  // Try to find stats in aria-labels and spans
-  // Instagram shows "X likes", "X views", "X comments"
-  const article = document.querySelector('article') || document
+  // Find the current active video/reel container
+  // Instagram Reels are shown in articles, and we want the one that's currently visible/playing
+  let container: Element | null = null
+
+  // Method 1: Check for dialog (modal view)
+  const dialog = document.querySelector('[role="dialog"]')
+  if (dialog && dialog.querySelector('video')) {
+    container = dialog
+    debugLog('Using dialog container for stats')
+  }
+
+  // Method 2: Find the article containing the playing video
+  if (!container) {
+    const videos = document.querySelectorAll('video')
+    for (const video of videos) {
+      // Check if video is playing or is in viewport
+      if (!video.paused || video.currentTime > 0) {
+        container = video.closest('article') || video.closest('[role="presentation"]')
+        if (container) {
+          debugLog('Using article with playing video for stats')
+          break
+        }
+      }
+    }
+  }
+
+  // Method 3: Fall back to first article with video
+  if (!container) {
+    const articles = document.querySelectorAll('article')
+    for (const article of articles) {
+      if (article.querySelector('video')) {
+        container = article
+        debugLog('Using first article with video for stats')
+        break
+      }
+    }
+  }
+
+  // Method 4: Use document if no container found
+  if (!container) {
+    container = document
+    debugLog('Using document for stats (no specific container found)')
+  }
+
+  // Now extract stats from the container
+  const article = container
 
   // Look for all interactive elements that might contain stats
   const allElements = article.querySelectorAll('span, button, a, section, div[role="button"]')
@@ -376,9 +419,8 @@ function extractStatsFromDOM(): { views: number | null; likes: number | null; co
     }
   }
 
-  // Instagram Reels: Look for action buttons with counts
-  // The like/comment/share buttons often have sibling spans with the count
-  const actionButtons = document.querySelectorAll('[aria-label*="Like"], [aria-label*="Comment"], [aria-label*="Share"], [aria-label*="Send"]')
+  // Instagram Reels: Look for action buttons with counts WITHIN the container
+  const actionButtons = container.querySelectorAll('[aria-label*="Like"], [aria-label*="Comment"], [aria-label*="Share"], [aria-label*="Send"]')
   for (const btn of actionButtons) {
     const ariaLabel = btn.getAttribute('aria-label') || ''
     const parent = btn.parentElement
@@ -392,54 +434,63 @@ function extractStatsFromDOM(): { views: number | null; likes: number | null; co
       if (numberMatch) {
         const count = parseInstagramNumber(numberMatch[1])
         if (count !== null) {
-          if (ariaLabel.toLowerCase().includes('like') && stats.likes === null) {
+          if (ariaLabel.toLowerCase().includes('like') && !ariaLabel.toLowerCase().includes('unlike') && stats.likes === null) {
             stats.likes = count
+            debugLog('Found likes from action button:', count)
           } else if (ariaLabel.toLowerCase().includes('comment') && stats.comments === null) {
             stats.comments = count
+            debugLog('Found comments from action button:', count)
           } else if ((ariaLabel.toLowerCase().includes('share') || ariaLabel.toLowerCase().includes('send')) && stats.shares === null) {
             stats.shares = count
+            debugLog('Found shares from action button:', count)
           }
         }
       }
     }
   }
 
-  // Instagram Reels: Look for views count in the Reels sidebar/overlay
-  // Format: "X plays", "X views", or just a number with play icon
-  if (stats.views === null) {
-    // Try multiple selectors for view counts
-    const viewSelectors = [
-      // Common Reels view count locations
-      '[class*="x1lliihq"][class*="x1plvlek"]', // View count in Reels
-      '[class*="ViewCount"]',
-      '[class*="playCount"]',
-      '[class*="view-count"]',
-      'span[class*="x1lliihq"]', // Generic span that often has counts
-    ]
-
-    for (const selector of viewSelectors) {
-      const elements = document.querySelectorAll(selector)
-      for (const el of elements) {
-        const text = el.textContent?.trim() || ''
-        // Match "X plays", "X views", or just a number followed by plays/views
-        const playsMatch = text.match(/^([\d,]+(?:\.\d+)?[KMB]?)\s*(?:plays?|views?)?$/i)
-        if (playsMatch) {
-          const count = parseInstagramNumber(playsMatch[1])
-          if (count !== null && count > 0) {
-            stats.views = count
-            break
-          }
+  // Instagram Reels: Try to find likes count from the "Liked by" section
+  if (stats.likes === null) {
+    // Look for "X likes" text
+    const likesElements = container.querySelectorAll('span, a, button')
+    for (const el of likesElements) {
+      const text = el.textContent?.trim() || ''
+      // Match "123 likes" or "1.2K likes" or "123,456 likes"
+      const likesMatch = text.match(/^([\d,]+(?:\.\d+)?[KMB]?)\s*likes?$/i)
+      if (likesMatch) {
+        const count = parseInstagramNumber(likesMatch[1])
+        if (count !== null && count > 0) {
+          stats.likes = count
+          debugLog('Found likes from text:', count)
+          break
         }
       }
-      if (stats.views !== null) break
     }
   }
 
-  // Look for views in any span near a play icon (SVG)
+  // Instagram Reels: Look for views/plays count
   if (stats.views === null) {
-    const playSvgs = document.querySelectorAll('svg[aria-label*="Play"], svg[aria-label*="play"]')
+    // Try to find play count in the container
+    const allElements = container.querySelectorAll('span, div')
+    for (const el of allElements) {
+      const text = el.textContent?.trim() || ''
+      // Match "123 views" or "1.2M plays" etc
+      const viewsMatch = text.match(/^([\d,]+(?:\.\d+)?[KMB]?)\s*(?:views?|plays?)$/i)
+      if (viewsMatch) {
+        const count = parseInstagramNumber(viewsMatch[1])
+        if (count !== null && count > 0) {
+          stats.views = count
+          debugLog('Found views from text:', count)
+          break
+        }
+      }
+    }
+  }
+
+  // Look for views near a play icon (SVG) within container
+  if (stats.views === null) {
+    const playSvgs = container.querySelectorAll('svg[aria-label*="Play"], svg[aria-label*="play"], svg[aria-label*="View"]')
     for (const svg of playSvgs) {
-      // Look at parent and siblings for a number
       const parent = svg.closest('div, span, button')
       if (parent) {
         const spans = parent.querySelectorAll('span')
@@ -448,8 +499,9 @@ function extractStatsFromDOM(): { views: number | null; likes: number | null; co
           const numberMatch = text.match(/^([\d,]+(?:\.\d+)?[KMB]?)$/i)
           if (numberMatch) {
             const count = parseInstagramNumber(numberMatch[1])
-            if (count !== null && count > 100) { // Views should be reasonably high
+            if (count !== null && count > 10) {
               stats.views = count
+              debugLog('Found views near play icon:', count)
               break
             }
           }
@@ -459,26 +511,34 @@ function extractStatsFromDOM(): { views: number | null; likes: number | null; co
     }
   }
 
-  // Look for views count in Reels - often shown at bottom of video
-  // Format: "X plays" or just a number near play icon
-  if (stats.views === null) {
-    const viewElements = document.querySelectorAll('[class*="view"], [class*="play"], span')
-    for (const el of viewElements) {
+  // Instagram Reels: Look for comments count
+  if (stats.comments === null) {
+    const commentElements = container.querySelectorAll('span, a, button')
+    for (const el of commentElements) {
       const text = el.textContent?.trim() || ''
-      const playsMatch = text.match(/^([\d,]+(?:\.\d+)?[KMB]?)\s*(?:plays?|views?)$/i)
-      if (playsMatch) {
-        stats.views = parseInstagramNumber(playsMatch[1])
-        break
+      // Match "123 comments" or "View all 45 comments"
+      const commentsMatch = text.match(/(?:view all\s*)?([\d,]+(?:\.\d+)?[KMB]?)\s*comments?/i)
+      if (commentsMatch) {
+        const count = parseInstagramNumber(commentsMatch[1])
+        if (count !== null && count >= 0) {
+          stats.comments = count
+          debugLog('Found comments from text:', count)
+          break
+        }
       }
     }
   }
 
   // Fallback: Look for "Liked by X and Y others" pattern
   if (stats.likes === null) {
-    const likedByMatch = article.textContent?.match(/liked by[^0-9]*and\s*([\d,]+(?:\.\d+)?[KMB]?)\s*others?/i)
+    const containerText = container.textContent || ''
+    const likedByMatch = containerText.match(/liked by[^0-9]*and\s*([\d,]+(?:\.\d+)?[KMB]?)\s*others?/i)
     if (likedByMatch) {
       stats.likes = parseInstagramNumber(likedByMatch[1])
-      if (stats.likes !== null) stats.likes += 1 // Add the named person
+      if (stats.likes !== null) {
+        stats.likes += 1 // Add the named person
+        debugLog('Found likes from "Liked by" pattern:', stats.likes)
+      }
     }
   }
 
@@ -487,50 +547,115 @@ function extractStatsFromDOM(): { views: number | null; likes: number | null; co
 }
 
 /**
+ * Extract the current visible reel's caption/description from the DOM.
+ * Instagram Reels don't update og:meta tags when scrolling, so we need to read the visible DOM.
+ */
+function extractReelCaptionFromDOM(): { caption: string | null; creator: string | null } {
+  let caption: string | null = null
+  let creator: string | null = null
+
+  // Find the current article (reel container)
+  const article = document.querySelector('article')
+
+  if (article) {
+    // Look for the caption text - usually in a span inside the article
+    // The caption is typically after the username and has longer text
+    const allSpans = article.querySelectorAll('span')
+    for (const span of allSpans) {
+      const text = span.textContent?.trim() || ''
+      // Skip short text (buttons, labels)
+      if (text.length < 20) continue
+      // Skip text that looks like metadata
+      if (text.match(/^[\d,]+\s*(likes?|views?|comments?)/i)) continue
+      // Skip "Sponsored" labels
+      if (text.toLowerCase() === 'sponsored') continue
+      // This might be the caption
+      if (text.length > caption?.length ?? 0) {
+        caption = text
+      }
+    }
+
+    // Find creator username - look for links that look like usernames
+    const usernameLinks = article.querySelectorAll('a[href^="/"]')
+    for (const link of usernameLinks) {
+      const href = link.getAttribute('href') || ''
+      // Username links look like /username/ or /username
+      const match = href.match(/^\/([a-zA-Z0-9._]+)\/?$/)
+      if (match && match[1].length > 1 && !['explore', 'reels', 'reel', 'p', 'tv', 'stories'].includes(match[1])) {
+        creator = `@${match[1]}`
+        break
+      }
+    }
+  }
+
+  // Also check for modal dialogs (when viewing a reel in popup)
+  const dialog = document.querySelector('[role="dialog"]')
+  if (dialog && (!caption || !creator)) {
+    const usernameLinks = dialog.querySelectorAll('a[href^="/"]')
+    for (const link of usernameLinks) {
+      const href = link.getAttribute('href') || ''
+      const match = href.match(/^\/([a-zA-Z0-9._]+)\/?$/)
+      if (match && match[1].length > 1 && !['explore', 'reels', 'reel', 'p', 'tv', 'stories'].includes(match[1])) {
+        if (!creator) creator = `@${match[1]}`
+        break
+      }
+    }
+
+    if (!caption) {
+      const allSpans = dialog.querySelectorAll('span')
+      for (const span of allSpans) {
+        const text = span.textContent?.trim() || ''
+        if (text.length < 20) continue
+        if (text.match(/^[\d,]+\s*(likes?|views?|comments?)/i)) continue
+        if (text.toLowerCase() === 'sponsored') continue
+        if (text.length > caption?.length ?? 0) {
+          caption = text
+        }
+      }
+    }
+  }
+
+  return { caption, creator }
+}
+
+/**
  * Extract video metadata from Instagram page.
+ * For Reels in a feed, we extract from the visible DOM since og:meta tags don't update.
  */
 function extractInstagramMetadata(): InstagramMetadataResponse {
   const emptyStats = { views: null, likes: null, comments: null, shares: null }
 
-  // Try to get title from og:title meta tag
+  // First, try to extract from the visible DOM (works for Reels feed scrolling)
+  const domData = extractReelCaptionFromDOM()
+  let creator = domData.creator
+  let description = domData.caption
+
+  // Fallback to og:meta for title if we're on a direct reel page
   const ogTitle = document.querySelector('meta[property="og:title"]')?.getAttribute('content')
-  const title = ogTitle || document.title || null
-
-  // Get description from og:description
   const ogDescription = document.querySelector('meta[property="og:description"]')?.getAttribute('content')
-  const description = ogDescription || null
 
-  // Extract hashtags from title and description
-  const titleHashtags = extractHashtags(ogTitle)
-  const descHashtags = extractHashtags(ogDescription)
-  const hashtags = [...new Set([...titleHashtags, ...descHashtags])]
-
-  // Try to extract creator from page
-  // Instagram URLs can be:
-  // - /username/reel/xxx/ (profile-based)
-  // - /reel/xxx/ (direct link)
-  // - /p/xxx/ (direct post link)
-  let creator: string | null = null
-
-  // Try from URL path (e.g., https://www.instagram.com/username/reel/xxx)
-  const pathMatch = window.location.pathname.match(/^\/([^/]+)\/(?:reel|reels|p|tv)\//)
-  if (pathMatch?.[1] && !['reel', 'reels', 'p', 'tv'].includes(pathMatch[1])) {
-    creator = `@${pathMatch[1]}`
-  }
-
-  // If not found in URL, try parsing from title (usually "Username on Instagram: caption...")
-  if (!creator && ogTitle) {
-    const titleMatch = ogTitle.match(/^(.+?) on Instagram:/)
-    if (titleMatch?.[1]) {
-      creator = `@${titleMatch[1].trim()}`
+  // If og:title doesn't look like a profile page, use it
+  // Profile titles look like "Name (@username) • Instagram photos and videos"
+  let title: string | null = null
+  if (ogTitle && !ogTitle.includes('• Instagram photos and videos') && !ogTitle.includes('• Instagram')) {
+    title = ogTitle
+    // Also try to extract description if we don't have one
+    if (!description && ogDescription && !ogDescription.match(/^\d+ Followers/)) {
+      description = ogDescription
     }
+  } else {
+    // Use the DOM-extracted caption as title
+    title = description
   }
 
-  // Also try parsing from description which often has "@username" mentions
-  if (!creator && ogDescription) {
-    const mentionMatch = ogDescription.match(/@([a-zA-Z0-9._]+)/)
-    if (mentionMatch?.[1]) {
-      creator = `@${mentionMatch[1]}`
+  // Extract hashtags from caption
+  const hashtags = extractHashtags(description)
+
+  // Try from URL path for creator (e.g., /username/reel/xxx)
+  if (!creator) {
+    const pathMatch = window.location.pathname.match(/^\/([^/]+)\/(?:reel|reels|p|tv)\//)
+    if (pathMatch?.[1] && !['reel', 'reels', 'p', 'tv'].includes(pathMatch[1])) {
+      creator = `@${pathMatch[1]}`
     }
   }
 
