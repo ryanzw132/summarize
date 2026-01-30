@@ -816,67 +816,58 @@ function isContentBlocked(): { blocked: boolean; reason?: string } {
 function isCurrentVideoAd(): InstagramAdCheckResponse {
   debugLog('Checking if current content is an ad')
 
+  // Helper to check if element is visible
+  const isVisible = (el: Element | null): boolean => {
+    if (!el) return false
+    const style = window.getComputedStyle(el)
+    return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'
+  }
+
+  // Common localized "Sponsored" variants
+  const sponsoredVariants = [
+    'sponsored', 'anzeige', 'gesponsert', // English, German
+    'publicité', 'sponsorisé', 'commandité', // French
+    'sponsorizzato', // Italian
+    'patrocinado', // Spanish, Portuguese
+    '広告', 'スポンサー', // Japanese
+    '광고', '스폰서', // Korean
+    '赞助', '广告', // Chinese
+  ]
+
   // The current article/post container
   const article = document.querySelector('article') || document
 
-  // Method 1: Check for "Sponsored" text label
-  // Instagram shows "Sponsored" below the username for ads
-  const allSpans = article.querySelectorAll('span, a, div')
+  // Method 1: Check for exact "Sponsored" text label (localized)
+  // Instagram shows "Sponsored" as a standalone label below the username for ads
+  // We need to be very specific - only match elements where the ENTIRE text is a sponsored variant
+  const allSpans = article.querySelectorAll('span, a')
   for (const el of allSpans) {
-    const text = el.textContent?.trim() || ''
-    // Check for exact "Sponsored" match (not part of another word)
-    if (text === 'Sponsored' || text === 'Paid partnership') {
-      debugLog('Found Sponsored label')
-      return { isAd: true, reason: 'Sponsored content' }
-    }
-  }
-
-  // Method 2: Check for sponsored header in reels
-  const header = article.querySelector('header')
-  if (header) {
-    const headerText = header.textContent || ''
-    if (headerText.includes('Sponsored')) {
-      debugLog('Found Sponsored in header')
-      return { isAd: true, reason: 'Sponsored header' }
-    }
-  }
-
-  // Method 3: Check aria-labels for ad indicators
-  const adAriaElements = article.querySelectorAll('[aria-label*="Sponsored"], [aria-label*="sponsored"], [aria-label*="Ad"]')
-  if (adAriaElements.length > 0) {
-    debugLog('Found ad aria-label')
-    return { isAd: true, reason: 'Ad aria-label detected' }
-  }
-
-  // Method 4: Check for ad-related data attributes
-  const adDataElements = article.querySelectorAll('[data-ad-id], [data-ad-preview], [data-sponsored]')
-  if (adDataElements.length > 0) {
-    debugLog('Found ad data attribute')
-    return { isAd: true, reason: 'Ad data attribute' }
-  }
-
-  // Method 5: Check LD+JSON for ad indicators
-  const scripts = document.querySelectorAll('script[type="application/ld+json"]')
-  for (const script of scripts) {
-    try {
-      const data = JSON.parse(script.textContent || '') as Record<string, unknown>
-      if (data.isAdvertisement === true || data.sponsored === true) {
-        debugLog('Found ad indicator in LD+JSON')
-        return { isAd: true, reason: 'LD+JSON ad indicator' }
+    const text = el.textContent?.trim().toLowerCase() || ''
+    // Must be exactly a sponsored variant with no other text
+    if (sponsoredVariants.includes(text) && isVisible(el)) {
+      // Verify this is in the header area (near username) not elsewhere
+      const nearHeader = el.closest('header') || el.closest('[class*="Header"]')
+      if (nearHeader) {
+        debugLog('Found Sponsored label in header:', text)
+        return { isAd: true, reason: 'Sponsored content' }
       }
-    } catch {
-      // Continue
     }
   }
 
-  // Method 6: Check for "Paid partnership with" label
-  const paidPartnership = article.querySelector('[class*="PaidPartnership"], [class*="paid-partnership"]')
-  if (paidPartnership) {
-    // This is branded content but not necessarily a skip-worthy ad
-    // Still flag it so user knows
-    debugLog('Found paid partnership')
-    return { isAd: true, reason: 'Paid partnership' }
+  // Method 2: Check for data attributes that specifically indicate ads
+  // Only check for very specific ad-related data attributes
+  const adDataElements = article.querySelectorAll('[data-ad-id], [data-ad-preview]')
+  for (const el of adDataElements) {
+    if (isVisible(el)) {
+      debugLog('Found visible ad data attribute')
+      return { isAd: true, reason: 'Ad data attribute' }
+    }
   }
+
+  // Note: We intentionally do NOT check for:
+  // - aria-label containing "Ad" (matches "Add", "Adjust", etc.)
+  // - Paid partnerships (creator content, not ads)
+  // - Generic class names
 
   debugLog('Not an ad')
   return { isAd: false }

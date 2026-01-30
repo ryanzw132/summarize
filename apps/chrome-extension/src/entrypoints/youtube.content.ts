@@ -868,79 +868,78 @@ function extractStatsFromDOM(): { views: number | null; likes: number | null; co
 /**
  * Check if the current video is an advertisement.
  * YouTube Shorts ads have specific indicators.
+ *
+ * IMPORTANT: Be very conservative here - only flag actual ads.
+ * False positives cause ALL videos to be skipped!
  */
 function isCurrentVideoAd(): YouTubeAdCheckResponse {
   debugLog('Checking if current video is an ad')
 
-  // Method 1: Check for "Ad" badge in the video overlay
-  const adBadges = [
-    // Standard ad badges
-    document.querySelector('.ytp-ad-badge'),
-    document.querySelector('.ytp-ad-text'),
-    document.querySelector('[class*="ad-badge"]'),
-    document.querySelector('.ad-showing'),
-    // Shorts specific
-    document.querySelector('ytd-reel-video-renderer[is-active] .ytd-ad-slot-renderer'),
-    document.querySelector('ytd-reel-video-renderer[is-active] [class*="AdBadge"]'),
-    document.querySelector('[data-ad-slot]'),
+  // Helper to check if element is visible
+  const isVisible = (el: Element | null): boolean => {
+    if (!el) return false
+    const style = window.getComputedStyle(el)
+    return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'
+  }
+
+  // Method 1: Check for YouTube's standard ad overlay elements
+  // These are specific YouTube ad classes that only appear during actual ads
+  // Also verify they're actually visible (not just present in DOM)
+  const adSelectors = [
+    '.ytp-ad-overlay-container',
+    '.ytp-ad-player-overlay',
+    '.video-ads.ytp-ad-module',
+    'ytd-ad-slot-renderer',
   ]
 
-  for (const badge of adBadges) {
-    if (badge) {
-      debugLog('Found ad badge element')
-      return { isAd: true, reason: 'Ad badge detected' }
+  for (const selector of adSelectors) {
+    const element = document.querySelector(selector)
+    if (element && isVisible(element)) {
+      debugLog('Found visible ad overlay element:', selector)
+      return { isAd: true, reason: 'Ad overlay detected' }
     }
   }
 
-  // Method 2: Check for "Ad" text in the player
-  const adTextIndicators = [
-    'Ad · ',
-    'Ad ·',
-    'Sponsored',
-    'Advertisement',
-  ]
-
-  const playerOverlay = document.querySelector('.ytp-chrome-top, .ytp-title, ytd-reel-video-renderer[is-active]')
-  if (playerOverlay) {
-    const overlayText = playerOverlay.textContent || ''
-    for (const indicator of adTextIndicators) {
-      if (overlayText.includes(indicator)) {
-        debugLog('Found ad text indicator:', indicator)
-        return { isAd: true, reason: `Ad text found: ${indicator}` }
-      }
-    }
-  }
-
-  // Method 3: Check for ad-related elements in player state
-  const adElements = document.querySelectorAll('[class*="ytp-ad"], [class*="ad-interrupting"], [class*="ad-showing"]')
-  if (adElements.length > 0) {
-    debugLog('Found ad-related class')
-    return { isAd: true, reason: 'Ad class detected' }
-  }
-
-  // Method 4: Check video player data attributes
-  const player = document.querySelector('#movie_player, ytd-player')
+  // Method 2: Check if the video player is in ad-showing state
+  // This is the most reliable indicator - YouTube adds this class only during actual ads
+  const player = document.querySelector('#movie_player')
   if (player) {
     const classList = player.className || ''
+    // These exact classes are added by YouTube's ad system
     if (classList.includes('ad-showing') || classList.includes('ad-interrupting')) {
-      debugLog('Player showing ad')
-      return { isAd: true, reason: 'Player in ad state' }
+      debugLog('Player in ad state')
+      return { isAd: true, reason: 'Player showing ad' }
     }
   }
 
-  // Method 5: For Shorts, check the active reel renderer
+  // Method 3: For Shorts, check for ad-specific elements in active reel
   const activeReel = document.querySelector('ytd-reel-video-renderer[is-active]')
   if (activeReel) {
-    const reelText = activeReel.textContent || ''
-    if (reelText.includes('Sponsored') || reelText.includes('Ad ·')) {
-      debugLog('Shorts reel is sponsored')
-      return { isAd: true, reason: 'Sponsored Shorts content' }
-    }
-
-    // Check for ad slot renderer inside active reel
-    if (activeReel.querySelector('ytd-ad-slot-renderer, [class*="AdSlot"]')) {
+    // Check for ad slot renderer - this is the definitive indicator for Shorts ads
+    const adSlot = activeReel.querySelector('ytd-ad-slot-renderer')
+    if (adSlot && isVisible(adSlot)) {
       debugLog('Ad slot found in active reel')
       return { isAd: true, reason: 'Ad slot in reel' }
+    }
+
+    // Check for "Sponsored" label specifically in the metadata area
+    // Include common localized variants
+    const sponsoredLabels = activeReel.querySelectorAll('[class*="ytd-badge-supported-renderer"]')
+    const sponsoredVariants = [
+      'sponsored', 'ad', 'anzeige', 'gesponsert', // English, German
+      'publicité', 'sponsorisé', 'annonce', // French
+      'sponsorizzato', 'annuncio', // Italian
+      'patrocinado', 'anuncio', // Spanish, Portuguese
+      '広告', 'スポンサー', // Japanese
+      '광고', '스폰서', // Korean
+      '赞助', '广告', // Chinese
+    ]
+    for (const label of sponsoredLabels) {
+      const text = label.textContent?.trim().toLowerCase() || ''
+      if (sponsoredVariants.includes(text)) {
+        debugLog('Found Sponsored/Ad badge:', text)
+        return { isAd: true, reason: 'Sponsored badge' }
+      }
     }
   }
 

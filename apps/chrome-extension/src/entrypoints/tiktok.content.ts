@@ -224,10 +224,157 @@ function extractTikTokMetadata(): TikTokMetadataResponse {
       shares: parseCount(statsData?.shareCount),
     }
 
+    // Fallback to DOM extraction if hydration data doesn't have stats
+    const domStats = extractTikTokStatsFromDOM()
+    if (stats.views === null) stats.views = domStats.views
+    if (stats.likes === null) stats.likes = domStats.likes
+    if (stats.comments === null) stats.comments = domStats.comments
+    if (stats.shares === null) stats.shares = domStats.shares
+
     return { title, description, creator, postedAt, hashtags, platform: 'tiktok', stats }
   } catch {
-    return emptyResponse
+    // Try DOM extraction even if main extraction fails
+    const domStats = extractTikTokStatsFromDOM()
+    return {
+      ...emptyResponse,
+      stats: domStats,
+    }
   }
+}
+
+/**
+ * Parse a number string like "1.2K", "3.4M", "1,234" to an integer.
+ */
+function parseTikTokNumber(text: string): number | null {
+  if (!text) return null
+  const cleaned = text.trim().toLowerCase().replace(/\s/g, '')
+
+  // Handle K, M, B suffixes
+  const suffixMatch = cleaned.match(/^([\d.,]+)\s*([kmb])$/i)
+  if (suffixMatch) {
+    const num = parseFloat(suffixMatch[1].replace(',', '.'))
+    if (!Number.isFinite(num)) return null
+    const suffix = suffixMatch[2].toLowerCase()
+    if (suffix === 'k') return Math.round(num * 1000)
+    if (suffix === 'm') return Math.round(num * 1000000)
+    if (suffix === 'b') return Math.round(num * 1000000000)
+  }
+
+  // Handle plain numbers with commas
+  const plainNum = parseInt(cleaned.replace(/[,.\s]/g, ''), 10)
+  return Number.isFinite(plainNum) ? plainNum : null
+}
+
+/**
+ * Extract stats from TikTok's DOM elements as fallback.
+ * TikTok shows stats in the action bar on the right side of videos.
+ */
+function extractTikTokStatsFromDOM(): { views: number | null; likes: number | null; comments: number | null; shares: number | null } {
+  const stats = { views: null as number | null, likes: null as number | null, comments: null as number | null, shares: null as number | null }
+
+  try {
+    // Find the active video container
+    const activeVideo = findActiveVideoElement()
+    const videoContainer = activeVideo?.closest('[class*="DivItemContainer"], [class*="DivVideoWrapper"], [data-e2e="recommend-list-item-container"]')
+      || document.querySelector('[class*="DivItemContainer"], [class*="DivVideoWrapper"]')
+      || document
+
+    debugLog('Extracting stats from DOM, container:', videoContainer)
+
+    // TikTok action buttons are typically in a vertical bar on the right
+    // Each button has an icon and a count displayed as strong or span text
+
+    // Method 1: Look for data-e2e attributes (most reliable)
+    const likeCount = videoContainer.querySelector('[data-e2e="like-count"], [data-e2e="browse-like-count"]')
+    if (likeCount) {
+      stats.likes = parseTikTokNumber(likeCount.textContent || '')
+      debugLog('Found likes from data-e2e:', stats.likes)
+    }
+
+    const commentCount = videoContainer.querySelector('[data-e2e="comment-count"], [data-e2e="browse-comment-count"]')
+    if (commentCount) {
+      stats.comments = parseTikTokNumber(commentCount.textContent || '')
+      debugLog('Found comments from data-e2e:', stats.comments)
+    }
+
+    const shareCount = videoContainer.querySelector('[data-e2e="share-count"], [data-e2e="undefined-count"]')
+    if (shareCount) {
+      stats.shares = parseTikTokNumber(shareCount.textContent || '')
+      debugLog('Found shares from data-e2e:', stats.shares)
+    }
+
+    // View count is sometimes in a different location
+    const viewCount = videoContainer.querySelector('[data-e2e="video-views"], [data-e2e="browse-video-views"]')
+    if (viewCount) {
+      stats.views = parseTikTokNumber(viewCount.textContent || '')
+      debugLog('Found views from data-e2e:', stats.views)
+    }
+
+    // Method 2: Look for strong elements near action buttons
+    // TikTok often uses <strong> for the count numbers
+    if (stats.likes === null || stats.comments === null || stats.shares === null) {
+      const strongElements = videoContainer.querySelectorAll('strong, [class*="StrongText"]')
+      for (const strong of strongElements) {
+        const text = strong.textContent?.trim() || ''
+        // Check if this looks like a count (number or number with K/M suffix)
+        if (!text.match(/^[\d.,]+[KMB]?$/i)) continue
+
+        const count = parseTikTokNumber(text)
+        if (count === null) continue
+
+        // Try to determine what type of stat this is by looking at nearby elements
+        const parent = strong.closest('button, [role="button"], a, div')
+        if (!parent) continue
+
+        const parentClasses = parent.className?.toLowerCase() || ''
+        const parentText = parent.textContent?.toLowerCase() || ''
+        const ariaLabel = parent.getAttribute('aria-label')?.toLowerCase() || ''
+
+        // Determine stat type from context
+        if (stats.likes === null && (parentClasses.includes('like') || ariaLabel.includes('like') || parentText.includes('like'))) {
+          stats.likes = count
+          debugLog('Found likes from strong:', count)
+        } else if (stats.comments === null && (parentClasses.includes('comment') || ariaLabel.includes('comment') || parentText.includes('comment'))) {
+          stats.comments = count
+          debugLog('Found comments from strong:', count)
+        } else if (stats.shares === null && (parentClasses.includes('share') || ariaLabel.includes('share') || parentText.includes('share'))) {
+          stats.shares = count
+          debugLog('Found shares from strong:', count)
+        }
+      }
+    }
+
+    // Method 3: Look for spans with class containing "Count"
+    if (stats.likes === null || stats.comments === null || stats.shares === null) {
+      const countSpans = videoContainer.querySelectorAll('[class*="Count"], [class*="ActionItem"] span')
+      for (const span of countSpans) {
+        const text = span.textContent?.trim() || ''
+        if (!text.match(/^[\d.,]+[KMB]?$/i)) continue
+
+        const count = parseTikTokNumber(text)
+        if (count === null) continue
+
+        // Check parent for type hint
+        const parent = span.closest('[class*="Like"], [class*="Comment"], [class*="Share"], [class*="ActionItem"]')
+        if (!parent) continue
+
+        const parentClasses = parent.className?.toLowerCase() || ''
+        if (stats.likes === null && parentClasses.includes('like')) {
+          stats.likes = count
+        } else if (stats.comments === null && parentClasses.includes('comment')) {
+          stats.comments = count
+        } else if (stats.shares === null && parentClasses.includes('share')) {
+          stats.shares = count
+        }
+      }
+    }
+
+    debugLog('Extracted TikTok DOM stats:', stats)
+  } catch (err) {
+    debugLog('Error extracting TikTok DOM stats:', err)
+  }
+
+  return stats
 }
 
 function normalizeSubtitleInfos(raw: unknown): TikTokSubtitleInfo[] {
@@ -869,88 +1016,76 @@ let lastSeenVideoId: string | null = null
 /**
  * Check if the current video is an advertisement.
  * TikTok ads have specific indicators in the UI.
+ *
+ * IMPORTANT: Be very conservative here - only flag actual ads.
+ * False positives cause ALL videos to be skipped!
  */
 function isCurrentVideoAd(): TikTokAdCheckResponse {
   debugLog('Checking if current video is an ad')
 
-  // Method 1: Check for "Sponsored" label in the video container
-  const sponsoredIndicators = [
-    // Direct sponsored labels
-    document.querySelector('[data-e2e="video-ad-badge"]'),
-    document.querySelector('[class*="SponsoBadge"]'),
-    document.querySelector('[class*="AdBadge"]'),
-    document.querySelector('[class*="DivAdBadge"]'),
-    document.querySelector('[data-e2e*="ad"]'),
+  // Helper to check if element is visible
+  const isVisible = (el: Element | null): boolean => {
+    if (!el) return false
+    const style = window.getComputedStyle(el)
+    return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'
+  }
+
+  // Common localized "Sponsored" variants
+  const sponsoredVariants = [
+    'sponsored', 'ad', 'anzeige', 'gesponsert', // English, German
+    'publicité', 'sponsorisé', 'annonce', // French
+    'sponsorizzato', 'annuncio', // Italian
+    'patrocinado', 'anuncio', // Spanish, Portuguese
+    '広告', 'スポンサー', // Japanese
+    '광고', '스폰서', // Korean
+    '赞助', '广告', // Chinese
+    'promoted', // English alternative
   ]
 
-  for (const indicator of sponsoredIndicators) {
-    if (indicator) {
-      debugLog('Found ad indicator element')
-      return { isAd: true, reason: 'Ad badge detected' }
-    }
-  }
-
-  // Method 2: Check for "Sponsored" text in the video info
-  // Find the currently visible/active video container
-  const activeVideo = findActiveVideoElement()
-  let videoContainer: Element | null = null
-
-  if (activeVideo) {
-    // Walk up to find the video container
-    videoContainer = activeVideo.closest('[class*="DivItemContainer"], [class*="DivVideoWrapper"], [data-e2e="recommend-list-item-container"]')
-  }
-
-  // Also check the body for global sponsored indicators
-  const containers = videoContainer ? [videoContainer, document.body] : [document.body]
-
-  for (const container of containers) {
-    const text = container.textContent || ''
-
-    // Check for various sponsored indicators
-    if (text.includes('Sponsored') && !text.includes('Sponsor a creator')) {
-      // Make sure it's actually on the current video, not a side element
-      const sponsoredEl = container.querySelector('span, div, a')
-      if (sponsoredEl) {
-        const elText = sponsoredEl.textContent || ''
-        if (elText.trim() === 'Sponsored' || elText.includes('Sponsored ·')) {
-          debugLog('Found Sponsored text')
-          return { isAd: true, reason: 'Sponsored content' }
-        }
-      }
-    }
-
-    // Check for "Ad" prefix in username area
-    const adPrefixes = ['Ad ·', 'Ad·', '· Ad', '·Ad', 'Promoted']
-    for (const prefix of adPrefixes) {
-      if (text.includes(prefix)) {
-        debugLog('Found ad prefix:', prefix)
-        return { isAd: true, reason: `Ad indicator: ${prefix}` }
-      }
-    }
-  }
-
-  // Method 3: Check itemStruct for ad indicators
+  // Method 1: Check itemStruct for ad indicators (most reliable)
+  // TikTok's hydration data contains explicit ad flags
   const itemStruct = extractTikTokItemStruct()
   if (itemStruct) {
     const item = itemStruct as Record<string, unknown>
 
-    // Check for ad-related flags
-    if (item.isAd === true || item.adAuthorization !== undefined || item.adLabelVersion !== undefined) {
-      debugLog('Found ad flag in itemStruct')
+    // Check for explicit ad flag - this is definitive
+    if (item.isAd === true) {
+      debugLog('Found isAd=true in itemStruct')
       return { isAd: true, reason: 'Ad flag in video data' }
     }
 
-    // Check for branded content
-    if (item.isBrandedContent === true) {
-      debugLog('Found branded content flag')
-      return { isAd: true, reason: 'Branded content' }
-    }
-
-    // Check author for ad indicators
+    // Check author for ad virtual flag
     const author = item.author as Record<string, unknown> | undefined
     if (author?.isADVirtual === true) {
       debugLog('Found ad virtual author')
       return { isAd: true, reason: 'Ad virtual author' }
+    }
+  }
+
+  // Method 2: Check for TikTok's specific ad badge element
+  // Only use exact data-e2e attribute, not wildcard, and verify visibility
+  const adBadge = document.querySelector('[data-e2e="video-ad-badge"]')
+  if (adBadge && isVisible(adBadge)) {
+    debugLog('Found visible ad badge element')
+    return { isAd: true, reason: 'Ad badge detected' }
+  }
+
+  // Method 3: Look for "Sponsored" label near the active video
+  // Be very specific - only check elements that are definitely ad labels
+  const activeVideo = findActiveVideoElement()
+  if (activeVideo) {
+    const videoContainer = activeVideo.closest('[class*="DivItemContainer"], [class*="DivVideoWrapper"], [data-e2e="recommend-list-item-container"]')
+    if (videoContainer) {
+      // Look for spans that contain exactly sponsored text (localized)
+      const allSpans = videoContainer.querySelectorAll('span')
+      for (const span of allSpans) {
+        const text = span.textContent?.trim().toLowerCase() || ''
+        // Must be exactly a sponsored variant - not part of longer text
+        if (sponsoredVariants.includes(text) && isVisible(span)) {
+          debugLog('Found exact Sponsored text:', text)
+          return { isAd: true, reason: 'Sponsored content' }
+        }
+      }
     }
   }
 
