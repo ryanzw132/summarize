@@ -19,11 +19,13 @@ type InstagramTranscriptResponse =
       durationSeconds: number | null
       title: string | null
     }
-  | { ok: false; error: string; reason: 'no_video' | 'extraction_failed' | 'unsupported_url' | 'auth_required' | 'blocked' }
+  | { ok: false; error: string; reason: 'no_video' | 'extraction_failed' | 'unsupported_url' | 'auth_required' | 'blocked' | 'is_ad' }
 
 type InstagramMetadataRequest = { type: 'instagram-metadata' }
 type InstagramScrollNextRequest = { type: 'instagram-scroll-next' }
 type InstagramScrollNextResponse = { ok: boolean }
+type InstagramAdCheckRequest = { type: 'instagram-is-ad' }
+type InstagramAdCheckResponse = { isAd: boolean; reason?: string }
 type InstagramMetadataResponse = {
   title: string | null
   description: string | null
@@ -402,6 +404,61 @@ function extractStatsFromDOM(): { views: number | null; likes: number | null; co
     }
   }
 
+  // Instagram Reels: Look for views count in the Reels sidebar/overlay
+  // Format: "X plays", "X views", or just a number with play icon
+  if (stats.views === null) {
+    // Try multiple selectors for view counts
+    const viewSelectors = [
+      // Common Reels view count locations
+      '[class*="x1lliihq"][class*="x1plvlek"]', // View count in Reels
+      '[class*="ViewCount"]',
+      '[class*="playCount"]',
+      '[class*="view-count"]',
+      'span[class*="x1lliihq"]', // Generic span that often has counts
+    ]
+
+    for (const selector of viewSelectors) {
+      const elements = document.querySelectorAll(selector)
+      for (const el of elements) {
+        const text = el.textContent?.trim() || ''
+        // Match "X plays", "X views", or just a number followed by plays/views
+        const playsMatch = text.match(/^([\d,]+(?:\.\d+)?[KMB]?)\s*(?:plays?|views?)?$/i)
+        if (playsMatch) {
+          const count = parseInstagramNumber(playsMatch[1])
+          if (count !== null && count > 0) {
+            stats.views = count
+            break
+          }
+        }
+      }
+      if (stats.views !== null) break
+    }
+  }
+
+  // Look for views in any span near a play icon (SVG)
+  if (stats.views === null) {
+    const playSvgs = document.querySelectorAll('svg[aria-label*="Play"], svg[aria-label*="play"]')
+    for (const svg of playSvgs) {
+      // Look at parent and siblings for a number
+      const parent = svg.closest('div, span, button')
+      if (parent) {
+        const spans = parent.querySelectorAll('span')
+        for (const span of spans) {
+          const text = span.textContent?.trim() || ''
+          const numberMatch = text.match(/^([\d,]+(?:\.\d+)?[KMB]?)$/i)
+          if (numberMatch) {
+            const count = parseInstagramNumber(numberMatch[1])
+            if (count !== null && count > 100) { // Views should be reasonably high
+              stats.views = count
+              break
+            }
+          }
+        }
+      }
+      if (stats.views !== null) break
+    }
+  }
+
   // Look for views count in Reels - often shown at bottom of video
   // Format: "X plays" or just a number near play icon
   if (stats.views === null) {
@@ -425,6 +482,7 @@ function extractStatsFromDOM(): { views: number | null; likes: number | null; co
     }
   }
 
+  debugLog('Extracted DOM stats:', stats)
   return stats
 }
 
@@ -560,12 +618,71 @@ function extractInstagramMetadata(): InstagramMetadataResponse {
 
 /**
  * Scroll to the next Instagram Reel.
+ * Handles both vertical feed scroll and horizontal modal navigation.
  */
 function scrollToNextReel(): InstagramScrollNextResponse {
   try {
-    // Instagram Reels uses a vertical swipe interface
-    // Try multiple methods
+    // Check if we're in a modal/dialog view that contains a video (reel modal)
+    // Be specific to avoid triggering on login/share dialogs
+    const dialog = document.querySelector('[role="dialog"], [aria-modal="true"]')
+    const isReelModal = dialog && (
+      dialog.querySelector('video') !== null ||
+      dialog.querySelector('button[aria-label*="Next"]') !== null ||
+      dialog.querySelector('svg[aria-label*="Next"]') !== null
+    )
 
+    debugLog('Scroll mode:', isReelModal ? 'modal (horizontal)' : 'feed (vertical)')
+
+    if (isReelModal && dialog) {
+      // Modal view uses LEFT/RIGHT arrow buttons for navigation
+      const container = dialog as Element
+
+      // Method 1: Find and click the "Next" button with various aria-labels
+      const nextButton =
+        container.querySelector('button[aria-label="Next"]') as HTMLElement ??
+        container.querySelector('button[aria-label="Next reel"]') as HTMLElement ??
+        container.querySelector('button[aria-label="Next post"]') as HTMLElement ??
+        container.querySelector('button[aria-label*="Next"]') as HTMLElement ??
+        // Try finding by SVG icon (right chevron/arrow)
+        container.querySelector('svg[aria-label="Next"]')?.closest('button, [role="button"]') as HTMLElement ??
+        container.querySelector('svg[aria-label*="Next"]')?.closest('button, [role="button"]') as HTMLElement ??
+        // Fallback: look for buttons with right-pointing chevron classes
+        container.querySelector('[class*="RightChevron"], [class*="rightChevron"], [class*="NextButton"]')?.closest('button, [role="button"]') as HTMLElement
+
+      if (nextButton) {
+        debugLog('Found next button, clicking')
+        nextButton.click()
+        return { ok: true }
+      }
+
+      // Method 2: Try keyboard ArrowRight (for horizontal modal navigation)
+      // Make dialog focusable and focus it
+      if (dialog instanceof HTMLElement) {
+        dialog.tabIndex = -1
+        dialog.focus()
+      }
+
+      // Also try focusing the video element inside
+      const videoEl = container.querySelector('video') as HTMLVideoElement
+      if (videoEl) {
+        videoEl.focus()
+      }
+
+      const rightEvent = new KeyboardEvent('keydown', {
+        key: 'ArrowRight',
+        code: 'ArrowRight',
+        keyCode: 39,
+        which: 39,
+        bubbles: true,
+      })
+      document.dispatchEvent(rightEvent)
+      container.dispatchEvent(rightEvent)
+      debugLog('Dispatched ArrowRight key event')
+
+      return { ok: true }
+    }
+
+    // Feed view (vertical scroll) - e.g., /reels/ page
     // Method 1: Try to find and click next button
     const nextButton = document.querySelector('button[aria-label*="Next"]') as HTMLElement
       || document.querySelector('[class*="DownChevron"]')?.closest('button') as HTMLElement
@@ -597,7 +714,8 @@ function scrollToNextReel(): InstagramScrollNextResponse {
     }
 
     return { ok: true }
-  } catch {
+  } catch (err) {
+    debugLog('Scroll error:', err)
     return { ok: false }
   }
 }
@@ -691,6 +809,79 @@ function isContentBlocked(): { blocked: boolean; reason?: string } {
   return { blocked: false }
 }
 
+/**
+ * Check if the current video/reel is an advertisement.
+ * Instagram ads have a "Sponsored" label.
+ */
+function isCurrentVideoAd(): InstagramAdCheckResponse {
+  debugLog('Checking if current content is an ad')
+
+  // The current article/post container
+  const article = document.querySelector('article') || document
+
+  // Method 1: Check for "Sponsored" text label
+  // Instagram shows "Sponsored" below the username for ads
+  const allSpans = article.querySelectorAll('span, a, div')
+  for (const el of allSpans) {
+    const text = el.textContent?.trim() || ''
+    // Check for exact "Sponsored" match (not part of another word)
+    if (text === 'Sponsored' || text === 'Paid partnership') {
+      debugLog('Found Sponsored label')
+      return { isAd: true, reason: 'Sponsored content' }
+    }
+  }
+
+  // Method 2: Check for sponsored header in reels
+  const header = article.querySelector('header')
+  if (header) {
+    const headerText = header.textContent || ''
+    if (headerText.includes('Sponsored')) {
+      debugLog('Found Sponsored in header')
+      return { isAd: true, reason: 'Sponsored header' }
+    }
+  }
+
+  // Method 3: Check aria-labels for ad indicators
+  const adAriaElements = article.querySelectorAll('[aria-label*="Sponsored"], [aria-label*="sponsored"], [aria-label*="Ad"]')
+  if (adAriaElements.length > 0) {
+    debugLog('Found ad aria-label')
+    return { isAd: true, reason: 'Ad aria-label detected' }
+  }
+
+  // Method 4: Check for ad-related data attributes
+  const adDataElements = article.querySelectorAll('[data-ad-id], [data-ad-preview], [data-sponsored]')
+  if (adDataElements.length > 0) {
+    debugLog('Found ad data attribute')
+    return { isAd: true, reason: 'Ad data attribute' }
+  }
+
+  // Method 5: Check LD+JSON for ad indicators
+  const scripts = document.querySelectorAll('script[type="application/ld+json"]')
+  for (const script of scripts) {
+    try {
+      const data = JSON.parse(script.textContent || '') as Record<string, unknown>
+      if (data.isAdvertisement === true || data.sponsored === true) {
+        debugLog('Found ad indicator in LD+JSON')
+        return { isAd: true, reason: 'LD+JSON ad indicator' }
+      }
+    } catch {
+      // Continue
+    }
+  }
+
+  // Method 6: Check for "Paid partnership with" label
+  const paidPartnership = article.querySelector('[class*="PaidPartnership"], [class*="paid-partnership"]')
+  if (paidPartnership) {
+    // This is branded content but not necessarily a skip-worthy ad
+    // Still flag it so user knows
+    debugLog('Found paid partnership')
+    return { isAd: true, reason: 'Paid partnership' }
+  }
+
+  debugLog('Not an ad')
+  return { isAd: false }
+}
+
 async function extractTranscript(): Promise<InstagramTranscriptResponse> {
   debugLog('Starting transcript extraction')
   debugLog('URL:', window.location.href)
@@ -771,11 +962,22 @@ export default defineContentScript({
 
     chrome.runtime.onMessage.addListener(
       (
-        message: InstagramTranscriptRequest | InstagramMetadataRequest | InstagramScrollNextRequest,
+        message: InstagramTranscriptRequest | InstagramMetadataRequest | InstagramScrollNextRequest | InstagramAdCheckRequest,
         _sender,
-        sendResponse: (response: InstagramTranscriptResponse | InstagramMetadataResponse | InstagramScrollNextResponse) => void
+        sendResponse: (response: InstagramTranscriptResponse | InstagramMetadataResponse | InstagramScrollNextResponse | InstagramAdCheckResponse) => void
       ) => {
         if (message?.type === 'instagram-transcript') {
+          // First check if it's an ad
+          const adCheck = isCurrentVideoAd()
+          if (adCheck.isAd) {
+            sendResponse({
+              ok: false,
+              error: `Skipping ad: ${adCheck.reason}`,
+              reason: 'is_ad',
+            })
+            return false
+          }
+
           extractTranscript()
             .then(sendResponse)
             .catch((err) => {
@@ -794,6 +996,10 @@ export default defineContentScript({
         }
         if (message?.type === 'instagram-scroll-next') {
           sendResponse(scrollToNextReel())
+          return false
+        }
+        if (message?.type === 'instagram-is-ad') {
+          sendResponse(isCurrentVideoAd())
           return false
         }
         return undefined

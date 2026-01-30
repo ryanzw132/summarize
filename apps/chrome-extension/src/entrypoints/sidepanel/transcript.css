@@ -160,9 +160,53 @@ footer {
   padding: 32px 16px;
 }
 
+.setup {
+  text-align: left;
+}
+
+.setup h2 {
+  margin: 0 0 12px 0;
+  font-size: 16px;
+  color: var(--text-primary);
+}
+
 .setup p, .error p, .unsupported p {
   margin-bottom: 16px;
   color: var(--text-muted);
+}
+
+.setup-step {
+  margin-bottom: 16px;
+}
+
+.setup-step p {
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.setup-command {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-secondary);
+  padding: 8px 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+
+.setup-command code {
+  flex: 1;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  user-select: all;
+}
+
+.btn-small {
+  padding: 4px 8px;
+  font-size: 11px;
+  flex-shrink: 0;
 }
 
 .error p {
@@ -406,4 +450,223 @@ footer .btn-primary {
 
 footer .btn-secondary {
   flex-shrink: 0;
+}
+
+/* =============================================================================
+   ERROR REPORTING UI
+   ============================================================================= */
+
+.auto-scroll-error {
+  background: rgba(248, 113, 113, 0.1);
+  border: 1px solid var(--error);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 8px 0;
+}
+
+.error-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.error-code-badge {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--error);
+  color: white;
+}
+
+.error-severity {
+  font-size: 10px;
+  text-transform: uppercase;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+}
+
+.error-severity.fatal {
+  background: #7f1d1d;
+  color: #fecaca;
+}
+
+.error-severity.error {
+  background: #991b1b;
+  color: #fecaca;
+}
+
+.error-severity.warn {
+  background: #854d0e;
+  color: #fef08a;
+}
+
+.error-severity.info {
+  background: #1e40af;
+  color: #bfdbfe;
+}
+
+.error-message {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--error);
+  margin-bottom: 8px;
+}
+
+.error-details {
+  margin: 8px 0;
+  font-size: 12px;
+}
+
+.error-details summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 4px 0;
+}
+
+.error-details summary:hover {
+  color: var(--text);
+}
+
+.error-technical {
+  margin-top: 8px;
+  padding: 8px;
+  background: var(--bg-secondary);
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-muted);
+}
+
+.error-action {
+  font-size: 13px;
+  color: var(--text);
+  padding: 8px;
+  background: var(--bg-secondary);
+  border-radius: 4px;
+  border-left: 3px solid var(--accent);
+}
+
+.error-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.error-history-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 6px 12px;
+  background: rgba(248, 113, 113, 0.05);
+  border-radius: 4px;
+  margin-top: 8px;
+}
+
+.btn-link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.btn-link:hover {
+  color: var(--accent-hover);
+}
+
+/* Error history modal */
+.error-history-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.8);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.error-history-content {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  max-width: 600px;
+  max-height: 80vh;
+  width: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.error-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+.error-history-header h3 {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.error-history-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.error-history-item {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.error-history-item:last-child {
+  margin-bottom: 0;
+}
+
+.error-history-item-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.error-history-item-time {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.error-history-item-message {
+  color: var(--text);
+}
+
+.error-history-actions {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
 }

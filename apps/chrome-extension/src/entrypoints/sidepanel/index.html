@@ -19,8 +19,33 @@
 
     <main>
       <div id="setup" class="setup hidden">
-        <p>Setup required. Please configure your daemon token in the extension options.</p>
-        <button id="openOptions" type="button" class="btn">Open Options</button>
+        <h2>Setup Required</h2>
+        <p>Install the summarize CLI and start the daemon:</p>
+
+        <div class="setup-step">
+          <p><strong>1. Install CLI:</strong></p>
+          <div class="setup-command">
+            <code id="installCmd">npm i -g @steipete/summarize</code>
+            <button id="copyInstallCmd" type="button" class="btn btn-small">Copy</button>
+          </div>
+        </div>
+
+        <div class="setup-step">
+          <p><strong>2. Start daemon with token:</strong></p>
+          <div class="setup-command">
+            <code id="daemonCmd">summarize daemon install --token <span id="tokenDisplay">loading...</span></code>
+            <button id="copyDaemonCmd" type="button" class="btn btn-small">Copy</button>
+          </div>
+        </div>
+
+        <div class="setup-step">
+          <p><strong>3. Verify:</strong></p>
+          <div class="setup-command">
+            <code>summarize daemon status</code>
+          </div>
+        </div>
+
+        <button id="openOptions" type="button" class="btn" style="margin-top: 12px;">Open Options</button>
       </div>
 
       <div id="error" class="error hidden">
@@ -73,6 +98,31 @@
           <span id="autoScrollStatus">Collecting transcripts...</span>
           <span id="autoScrollCount">0 videos</span>
         </div>
+
+        <!-- Error display panel -->
+        <div id="autoScrollError" class="auto-scroll-error hidden">
+          <div class="error-header">
+            <span id="errorCodeBadge" class="error-code-badge">ERROR</span>
+            <span id="errorSeverity" class="error-severity">error</span>
+          </div>
+          <p id="autoScrollErrorMessage" class="error-message"></p>
+          <details class="error-details">
+            <summary>Technical Details</summary>
+            <div id="autoScrollErrorTechnical" class="error-technical"></div>
+          </details>
+          <p id="autoScrollErrorAction" class="error-action"></p>
+          <div class="error-actions">
+            <button id="copyErrorReportBtn" type="button" class="btn btn-small">Copy Error Report</button>
+            <button id="dismissErrorBtn" type="button" class="btn btn-small btn-secondary">Dismiss</button>
+          </div>
+        </div>
+
+        <!-- Error history summary -->
+        <div id="errorHistorySummary" class="error-history-summary hidden">
+          <span id="errorHistoryCount">0 errors</span>
+          <button id="viewErrorHistoryBtn" type="button" class="btn btn-link">View All</button>
+        </div>
+
         <div id="transcriptList" class="transcript-list"></div>
         <div class="auto-scroll-actions">
           <button id="copyAllBtn" type="button" class="btn btn-copy">Copy All</button>

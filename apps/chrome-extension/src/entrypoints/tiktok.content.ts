@@ -51,11 +51,13 @@ type TikTokTranscriptResponse =
       source: 'tiktok-captions'
       durationSeconds: number | null
     }
-  | { ok: false; error: string; reason: 'no_captions' | 'fetch_failed' | 'parse_failed' | 'extraction_error' }
+  | { ok: false; error: string; reason: 'no_captions' | 'fetch_failed' | 'parse_failed' | 'extraction_error' | 'is_ad' }
 
 type TikTokMetadataRequest = { type: 'tiktok-metadata' }
 type TikTokScrollNextRequest = { type: 'tiktok-scroll-next' }
 type TikTokScrollNextResponse = { ok: boolean }
+type TikTokAdCheckRequest = { type: 'tiktok-is-ad' }
+type TikTokAdCheckResponse = { isAd: boolean; reason?: string }
 type TikTokMetadataResponse = {
   title: string | null
   description: string | null
@@ -386,14 +388,95 @@ function extractItemStructFromSigiState(data: unknown): TikTokItemStruct | null 
   return first ?? null
 }
 
+/**
+ * Read JSON data from script tag or window object.
+ * Tries window object first (has latest data after hydration), falls back to script tag.
+ */
 function readJsonScript(id: string): unknown | null {
-  const scriptEl = document.getElementById(id)
-  if (!scriptEl?.textContent) return null
+  // First, try to read from window object via page context injection
+  // This has the latest data after TikTok's client-side hydration updates
   try {
-    return JSON.parse(scriptEl.textContent)
+    const windowData = readFromWindowObject(id)
+    if (windowData) {
+      debugLog(`Read ${id} from window object`)
+      return windowData
+    }
   } catch {
-    return null
+    // Window object read failed, try script tag
   }
+
+  // Fall back to script tag (works for initial page load)
+  const scriptEl = document.getElementById(id)
+  if (scriptEl?.textContent) {
+    try {
+      const scriptData = JSON.parse(scriptEl.textContent)
+      debugLog(`Read ${id} from script tag`)
+      return scriptData
+    } catch {
+      // Parse failed
+    }
+  }
+
+  return null
+}
+
+/**
+ * Inject a script into the page context to read window objects.
+ * Returns the data synchronously using a data attribute hack.
+ * Note: May be blocked by CSP on some pages.
+ */
+function readFromWindowObject(varName: string): unknown | null {
+  try {
+    // Create a unique ID for this request
+    const requestId = `tiktok_data_${Date.now()}_${Math.random().toString(36).slice(2)}`
+
+    // Create a data element to receive the result
+    const dataEl = document.createElement('div')
+    dataEl.id = requestId
+    dataEl.style.display = 'none'
+    document.body.appendChild(dataEl)
+
+    // Inject script to read the window object
+    // Only serialize the needed parts to avoid performance issues with large objects
+    const script = document.createElement('script')
+    script.textContent = `
+      (function() {
+        try {
+          let data = window['${varName}'];
+          const el = document.getElementById('${requestId}');
+          if (!el || !data) return;
+
+          // For SIGI_STATE, only extract ItemModule to reduce size
+          if ('${varName}' === 'SIGI_STATE' && data.ItemModule) {
+            data = { ItemModule: data.ItemModule };
+          }
+
+          // Limit serialization size
+          const str = JSON.stringify(data);
+          if (str && str.length < 1000000) {
+            el.setAttribute('data-result', str);
+          }
+        } catch (e) {
+          // Ignore serialization errors
+        }
+      })();
+    `
+    document.body.appendChild(script)
+    script.remove()
+
+    // Read the result
+    const result = dataEl.getAttribute('data-result')
+    dataEl.remove()
+
+    if (result) {
+      return JSON.parse(result)
+    }
+  } catch {
+    // CSP might block inline scripts
+    debugLog('Page context injection failed (possibly CSP blocked)')
+  }
+
+  return null
 }
 
 /**
@@ -406,11 +489,72 @@ function extractTikTokVideoIdFromUrl(): string | null {
 }
 
 /**
+ * Find the video element that is most likely the "active" one (visible and playing).
+ */
+function findActiveVideoElement(): HTMLVideoElement | null {
+  const videos = Array.from(document.querySelectorAll('video'))
+
+  // Prefer videos that are playing
+  const playingVideo = videos.find(v => !v.paused && v.readyState >= 2)
+  if (playingVideo) return playingVideo
+
+  // Find videos in the center of the viewport
+  const viewportCenter = window.innerHeight / 2
+  let bestVideo: HTMLVideoElement | null = null
+  let bestDistance = Infinity
+
+  for (const video of videos) {
+    const rect = video.getBoundingClientRect()
+    // Check if video is visible in viewport
+    if (rect.bottom < 0 || rect.top > window.innerHeight) continue
+
+    const videoCenter = rect.top + rect.height / 2
+    const distance = Math.abs(videoCenter - viewportCenter)
+
+    if (distance < bestDistance) {
+      bestDistance = distance
+      bestVideo = video
+    }
+  }
+
+  return bestVideo
+}
+
+/**
  * Extract active video ID from DOM elements on FYP/Explore/Profile pages.
  * TikTok uses data attributes to identify the active video container.
  */
 function extractActiveVideoIdFromDOM(): string | null {
-  // Method 1: Look for active video container with data-e2e attributes
+  debugLog('Extracting active video ID from DOM')
+
+  // Method 1: Find the most visible/active video element first
+  const activeVideo = findActiveVideoElement()
+  if (activeVideo) {
+    debugLog('Found active video element')
+    // Walk up to find container with video ID
+    let parent: Element | null = activeVideo
+    while (parent) {
+      const id = parent.getAttribute('data-video-id')
+        || parent.getAttribute('data-item-id')
+        || parent.getAttribute('data-id')
+      if (id) {
+        debugLog('Found video ID from parent:', id)
+        return id
+      }
+
+      // Also check for ID in class names (TikTok sometimes embeds IDs there)
+      const className = parent.className || ''
+      const classIdMatch = className.match(/video-(\d{15,})/)
+      if (classIdMatch) {
+        debugLog('Found video ID from class:', classIdMatch[1])
+        return classIdMatch[1]
+      }
+
+      parent = parent.parentElement
+    }
+  }
+
+  // Method 2: Look for active video container with data-e2e attributes
   const activeContainers = [
     // FYP/Explore active video
     document.querySelector('[data-e2e="recommend-list-item-container"][class*="active"]'),
@@ -429,7 +573,10 @@ function extractActiveVideoIdFromDOM(): string | null {
     const videoId = container.getAttribute('data-video-id')
       || container.getAttribute('data-item-id')
       || container.getAttribute('data-id')
-    if (videoId) return videoId
+    if (videoId) {
+      debugLog('Found video ID from container:', videoId)
+      return videoId
+    }
 
     // Try to find it in nested elements
     const nestedWithId = container.querySelector('[data-video-id], [data-item-id], [data-id]')
@@ -437,29 +584,9 @@ function extractActiveVideoIdFromDOM(): string | null {
       const id = nestedWithId.getAttribute('data-video-id')
         || nestedWithId.getAttribute('data-item-id')
         || nestedWithId.getAttribute('data-id')
-      if (id) return id
-    }
-  }
-
-  // Method 2: Find the video element that's currently visible/playing
-  const videos = document.querySelectorAll('video')
-  for (const video of videos) {
-    // Check if video is playing or has substantial playback
-    if (!video.paused || video.currentTime > 0) {
-      // Walk up to find container with video ID
-      let parent: Element | null = video
-      while (parent) {
-        const id = parent.getAttribute('data-video-id')
-          || parent.getAttribute('data-item-id')
-          || parent.getAttribute('data-id')
-        if (id) return id
-
-        // Also check for ID in class names (TikTok sometimes embeds IDs there)
-        const className = parent.className || ''
-        const classIdMatch = className.match(/video-(\d{15,})/)
-        if (classIdMatch) return classIdMatch[1]
-
-        parent = parent.parentElement
+      if (id) {
+        debugLog('Found video ID from nested:', id)
+        return id
       }
     }
   }
@@ -470,14 +597,17 @@ function extractActiveVideoIdFromDOM(): string | null {
     const href = link.getAttribute('href') || ''
     const match = href.match(/\/video\/(\d+)/)
     if (match) {
-      // Check if this link is in the viewport (likely the active one)
+      // Check if this link is in the viewport center area
       const rect = link.getBoundingClientRect()
-      if (rect.top >= 0 && rect.top < window.innerHeight) {
+      const viewportCenter = window.innerHeight / 2
+      if (rect.top < viewportCenter && rect.bottom > viewportCenter) {
+        debugLog('Found video ID from link:', match[1])
         return match[1]
       }
     }
   }
 
+  debugLog('Could not find active video ID from DOM')
   return null
 }
 
@@ -733,24 +863,146 @@ async function fetchTikTokCaptions(
   return null
 }
 
+// Track the last seen video ID to detect changes
+let lastSeenVideoId: string | null = null
+
+/**
+ * Check if the current video is an advertisement.
+ * TikTok ads have specific indicators in the UI.
+ */
+function isCurrentVideoAd(): TikTokAdCheckResponse {
+  debugLog('Checking if current video is an ad')
+
+  // Method 1: Check for "Sponsored" label in the video container
+  const sponsoredIndicators = [
+    // Direct sponsored labels
+    document.querySelector('[data-e2e="video-ad-badge"]'),
+    document.querySelector('[class*="SponsoBadge"]'),
+    document.querySelector('[class*="AdBadge"]'),
+    document.querySelector('[class*="DivAdBadge"]'),
+    document.querySelector('[data-e2e*="ad"]'),
+  ]
+
+  for (const indicator of sponsoredIndicators) {
+    if (indicator) {
+      debugLog('Found ad indicator element')
+      return { isAd: true, reason: 'Ad badge detected' }
+    }
+  }
+
+  // Method 2: Check for "Sponsored" text in the video info
+  // Find the currently visible/active video container
+  const activeVideo = findActiveVideoElement()
+  let videoContainer: Element | null = null
+
+  if (activeVideo) {
+    // Walk up to find the video container
+    videoContainer = activeVideo.closest('[class*="DivItemContainer"], [class*="DivVideoWrapper"], [data-e2e="recommend-list-item-container"]')
+  }
+
+  // Also check the body for global sponsored indicators
+  const containers = videoContainer ? [videoContainer, document.body] : [document.body]
+
+  for (const container of containers) {
+    const text = container.textContent || ''
+
+    // Check for various sponsored indicators
+    if (text.includes('Sponsored') && !text.includes('Sponsor a creator')) {
+      // Make sure it's actually on the current video, not a side element
+      const sponsoredEl = container.querySelector('span, div, a')
+      if (sponsoredEl) {
+        const elText = sponsoredEl.textContent || ''
+        if (elText.trim() === 'Sponsored' || elText.includes('Sponsored ·')) {
+          debugLog('Found Sponsored text')
+          return { isAd: true, reason: 'Sponsored content' }
+        }
+      }
+    }
+
+    // Check for "Ad" prefix in username area
+    const adPrefixes = ['Ad ·', 'Ad·', '· Ad', '·Ad', 'Promoted']
+    for (const prefix of adPrefixes) {
+      if (text.includes(prefix)) {
+        debugLog('Found ad prefix:', prefix)
+        return { isAd: true, reason: `Ad indicator: ${prefix}` }
+      }
+    }
+  }
+
+  // Method 3: Check itemStruct for ad indicators
+  const itemStruct = extractTikTokItemStruct()
+  if (itemStruct) {
+    const item = itemStruct as Record<string, unknown>
+
+    // Check for ad-related flags
+    if (item.isAd === true || item.adAuthorization !== undefined || item.adLabelVersion !== undefined) {
+      debugLog('Found ad flag in itemStruct')
+      return { isAd: true, reason: 'Ad flag in video data' }
+    }
+
+    // Check for branded content
+    if (item.isBrandedContent === true) {
+      debugLog('Found branded content flag')
+      return { isAd: true, reason: 'Branded content' }
+    }
+
+    // Check author for ad indicators
+    const author = item.author as Record<string, unknown> | undefined
+    if (author?.isADVirtual === true) {
+      debugLog('Found ad virtual author')
+      return { isAd: true, reason: 'Ad virtual author' }
+    }
+  }
+
+  debugLog('Not an ad')
+  return { isAd: false }
+}
+
+/**
+ * Get the current active video's identifier (ID or src hash).
+ */
+function getCurrentVideoIdentifier(): string | null {
+  // Try video ID first
+  const videoId = getActiveVideoId()
+  if (videoId) return videoId
+
+  // Fall back to video src as identifier
+  const activeVideo = findActiveVideoElement()
+  if (activeVideo?.src) {
+    // Use a hash of the src as identifier
+    return activeVideo.src.slice(0, 100)
+  }
+
+  return null
+}
+
 /**
  * Scroll to the next TikTok video in feed.
  */
 function scrollToNextVideo(): TikTokScrollNextResponse {
   try {
-    // TikTok uses a vertical swipe to navigate between videos
-    // Try to find and click the down arrow button, or simulate scroll
+    // Remember current video to detect if scroll worked
+    lastSeenVideoId = getCurrentVideoIdentifier()
+    debugLog('Current video before scroll:', lastSeenVideoId)
 
-    // Method 1: Try to find navigation button
+    // TikTok uses a vertical swipe to navigate between videos
+    // Try multiple methods
+
+    // Method 1: Try to find navigation button (down arrow)
     const downButton = document.querySelector('[data-e2e="arrow-right"]') as HTMLElement
+      || document.querySelector('[data-e2e="arrow-down"]') as HTMLElement
+      || document.querySelector('button[data-e2e="down-arrow"]') as HTMLElement
       || document.querySelector('button[class*="ButtonBasicButtonContainer"][class*="StyledArrowDown"]') as HTMLElement
+      || document.querySelector('button[class*="DivArrowContainer"]:last-child') as HTMLElement
 
     if (downButton) {
+      debugLog('Found down button, clicking')
       downButton.click()
       return { ok: true }
     }
 
     // Method 2: Simulate keyboard down arrow
+    debugLog('Simulating ArrowDown key')
     const event = new KeyboardEvent('keydown', {
       key: 'ArrowDown',
       code: 'ArrowDown',
@@ -760,19 +1012,24 @@ function scrollToNextVideo(): TikTokScrollNextResponse {
     })
     document.dispatchEvent(event)
 
-    // Also try scrolling the container
+    // Also dispatch on the video container
     const videoContainer = document.querySelector('[class*="DivVideoFeedV2"]')
       || document.querySelector('[class*="DivItemContainer"]')?.parentElement
+      || document.querySelector('[id*="main-content-video_detail"]')
       || document.querySelector('main')
 
     if (videoContainer) {
+      videoContainer.dispatchEvent(event)
+      debugLog('Also scrolling container')
       videoContainer.scrollBy({ top: window.innerHeight, behavior: 'smooth' })
     } else {
+      debugLog('Scrolling window')
       window.scrollBy({ top: window.innerHeight, behavior: 'smooth' })
     }
 
     return { ok: true }
-  } catch {
+  } catch (err) {
+    debugLog('Scroll error:', err)
     return { ok: false }
   }
 }
@@ -781,14 +1038,34 @@ async function extractTranscript(): Promise<TikTokTranscriptResponse> {
   debugLog('Starting transcript extraction')
   debugLog('URL:', window.location.href)
 
-  const subtitleInfos = extractTikTokSubtitleInfos()
-  const durationSeconds = extractTikTokDurationSeconds()
+  // On FYP/explore pages, we might need to retry as data loads dynamically
+  const maxRetries = 3
+  let subtitleInfos: TikTokSubtitleInfo[] = []
+  let durationSeconds: number | null = null
 
-  debugLog('Found subtitle infos:', subtitleInfos.length)
-  debugLog('Video duration:', durationSeconds)
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const videoId = getActiveVideoId()
+    debugLog(`Attempt ${attempt + 1}: Active video ID:`, videoId)
+
+    subtitleInfos = extractTikTokSubtitleInfos()
+    durationSeconds = extractTikTokDurationSeconds()
+
+    debugLog('Found subtitle infos:', subtitleInfos.length)
+    debugLog('Video duration:', durationSeconds)
+
+    if (subtitleInfos.length > 0) {
+      break
+    }
+
+    // Wait a bit and retry (data might be loading)
+    if (attempt < maxRetries - 1) {
+      debugLog('No subtitles found, waiting before retry...')
+      await new Promise(resolve => setTimeout(resolve, 500))
+    }
+  }
 
   if (subtitleInfos.length === 0) {
-    debugLog('No captions found')
+    debugLog('No captions found after retries')
     return {
       ok: false,
       error: 'No captions available for this TikTok video',
@@ -833,11 +1110,22 @@ export default defineContentScript({
 
     chrome.runtime.onMessage.addListener(
       (
-        message: TikTokTranscriptRequest | TikTokMetadataRequest | TikTokScrollNextRequest,
+        message: TikTokTranscriptRequest | TikTokMetadataRequest | TikTokScrollNextRequest | TikTokAdCheckRequest,
         _sender,
-        sendResponse: (response: TikTokTranscriptResponse | TikTokMetadataResponse | TikTokScrollNextResponse) => void
+        sendResponse: (response: TikTokTranscriptResponse | TikTokMetadataResponse | TikTokScrollNextResponse | TikTokAdCheckResponse) => void
       ) => {
         if (message?.type === 'tiktok-transcript') {
+          // First check if it's an ad
+          const adCheck = isCurrentVideoAd()
+          if (adCheck.isAd) {
+            sendResponse({
+              ok: false,
+              error: `Skipping ad: ${adCheck.reason}`,
+              reason: 'is_ad',
+            })
+            return false
+          }
+
           extractTranscript()
             .then(sendResponse)
             .catch((err) => {
@@ -856,6 +1144,10 @@ export default defineContentScript({
         }
         if (message?.type === 'tiktok-scroll-next') {
           sendResponse(scrollToNextVideo())
+          return false
+        }
+        if (message?.type === 'tiktok-is-ad') {
+          sendResponse(isCurrentVideoAd())
           return false
         }
         return undefined

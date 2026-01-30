@@ -12,7 +12,28 @@ function debugLog(message: string, ...args: unknown[]): void {
 
 type YouTubeMetadataRequest = { type: 'youtube-metadata' }
 type YouTubeScrollNextRequest = { type: 'youtube-scroll-next' }
+type YouTubeTranscriptRequest = { type: 'youtube-transcript' }
 type YouTubeScrollNextResponse = { ok: boolean }
+
+interface TranscriptSegment {
+  startMs: number
+  endMs: number
+  text: string
+}
+
+type YouTubeTranscriptResponse =
+  | {
+      ok: true
+      text: string
+      segments: TranscriptSegment[]
+      source: 'youtube-captions'
+      durationSeconds: number | null
+    }
+  | { ok: false; error: string; reason: 'no_captions' | 'fetch_failed' | 'parse_failed' | 'extraction_error' | 'is_ad' }
+
+type YouTubeAdCheckRequest = { type: 'youtube-is-ad' }
+type YouTubeAdCheckResponse = { isAd: boolean; reason?: string }
+
 type YouTubeMetadataResponse = {
   title: string | null
   description: string | null
@@ -350,6 +371,335 @@ function extractFromInitialData(): Partial<YouTubeMetadataResponse> {
 }
 
 /**
+ * Caption track info from YouTube's player response
+ */
+interface CaptionTrack {
+  baseUrl: string
+  languageCode: string
+  name?: { simpleText?: string }
+  kind?: string // 'asr' for auto-generated
+}
+
+/**
+ * Read data from window object via page-context script injection.
+ * Note: This may be blocked by CSP on some sites. Falls back gracefully.
+ */
+function readFromPageContext(expression: string): unknown | null {
+  try {
+    const requestId = `yt_data_${Date.now()}_${Math.random().toString(36).slice(2)}`
+    const dataEl = document.createElement('div')
+    dataEl.id = requestId
+    dataEl.style.display = 'none'
+    document.body.appendChild(dataEl)
+
+    const script = document.createElement('script')
+    // Use a safer serialization that handles potential issues
+    script.textContent = `
+      (function() {
+        try {
+          const data = ${expression};
+          const el = document.getElementById('${requestId}');
+          if (el && data !== undefined && data !== null) {
+            // Limit serialization size to prevent performance issues
+            const str = JSON.stringify(data);
+            if (str && str.length < 500000) {
+              el.setAttribute('data-result', str);
+            }
+          }
+        } catch (e) {
+          // Ignore serialization errors (circular refs, etc.)
+        }
+      })();
+    `
+    document.body.appendChild(script)
+    script.remove()
+
+    const result = dataEl.getAttribute('data-result')
+    dataEl.remove()
+
+    if (result) {
+      return JSON.parse(result)
+    }
+  } catch {
+    // CSP might block inline scripts, fall back to script tag parsing
+    debugLog('Page context injection failed (possibly CSP blocked)')
+  }
+  return null
+}
+
+/**
+ * Extract caption tracks from YouTube's player response.
+ */
+function extractCaptionTracks(): CaptionTrack[] {
+  // Try to read from window.ytInitialPlayerResponse via page context
+  const playerResponse = readFromPageContext('window.ytInitialPlayerResponse')
+
+  if (!playerResponse || typeof playerResponse !== 'object') {
+    debugLog('Could not read ytInitialPlayerResponse from page context')
+    // Fall back to script tag parsing (used by getYTPlayerResponse)
+    const scriptData = getYTPlayerResponse()
+    if (!scriptData) return []
+
+    const captions = (scriptData as Record<string, unknown>).captions as Record<string, unknown> | undefined
+    const renderer = captions?.playerCaptionsTracklistRenderer as Record<string, unknown> | undefined
+    const tracks = renderer?.captionTracks as CaptionTrack[] | undefined
+    return Array.isArray(tracks) ? tracks : []
+  }
+
+  const record = playerResponse as Record<string, unknown>
+  const captions = record.captions as Record<string, unknown> | undefined
+  const renderer = captions?.playerCaptionsTracklistRenderer as Record<string, unknown> | undefined
+  const tracks = renderer?.captionTracks as CaptionTrack[] | undefined
+
+  return Array.isArray(tracks) ? tracks : []
+}
+
+/**
+ * Select the best caption track (prefer English manual captions over auto-generated).
+ */
+function selectBestCaptionTrack(tracks: CaptionTrack[]): CaptionTrack | null {
+  if (tracks.length === 0) return null
+
+  // Prefer English manual captions
+  const englishManual = tracks.find(t =>
+    t.languageCode.startsWith('en') && t.kind !== 'asr'
+  )
+  if (englishManual) return englishManual
+
+  // Then any English (including auto-generated)
+  const english = tracks.find(t => t.languageCode.startsWith('en'))
+  if (english) return english
+
+  // Then any manual captions
+  const manual = tracks.find(t => t.kind !== 'asr')
+  if (manual) return manual
+
+  // Finally, first available
+  return tracks[0]
+}
+
+/**
+ * Parse YouTube's TimedText XML format.
+ */
+function parseTimedTextXml(xml: string): { text: string; segments: TranscriptSegment[] } | null {
+  try {
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(xml, 'text/xml')
+    const textElements = doc.querySelectorAll('text')
+
+    if (textElements.length === 0) return null
+
+    const segments: TranscriptSegment[] = []
+    const textParts: string[] = []
+
+    for (const el of textElements) {
+      const start = parseFloat(el.getAttribute('start') || '0')
+      const dur = parseFloat(el.getAttribute('dur') || '0')
+      const text = el.textContent?.replace(/&#\d+;/g, match => {
+        const code = parseInt(match.slice(2, -1), 10)
+        return String.fromCharCode(code)
+      }).replace(/<[^>]+>/g, '').trim() || ''
+
+      if (text) {
+        segments.push({
+          startMs: Math.round(start * 1000),
+          endMs: Math.round((start + dur) * 1000),
+          text,
+        })
+        textParts.push(text)
+      }
+    }
+
+    if (segments.length === 0) return null
+
+    return {
+      text: textParts.join(' '),
+      segments,
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Parse YouTube's JSON3 caption format.
+ */
+function parseJson3Captions(json: string): { text: string; segments: TranscriptSegment[] } | null {
+  try {
+    const data = JSON.parse(json) as { events?: Array<{ tStartMs?: number; dDurationMs?: number; segs?: Array<{ utf8?: string }> }> }
+    if (!data.events) return null
+
+    const segments: TranscriptSegment[] = []
+    const textParts: string[] = []
+
+    for (const event of data.events) {
+      if (!event.segs) continue
+
+      const startMs = event.tStartMs || 0
+      const durationMs = event.dDurationMs || 0
+      const text = event.segs.map(seg => seg.utf8 || '').join('').trim()
+
+      if (text && text !== '\n') {
+        segments.push({
+          startMs,
+          endMs: startMs + durationMs,
+          text,
+        })
+        textParts.push(text)
+      }
+    }
+
+    if (segments.length === 0) return null
+
+    return {
+      text: textParts.join(' '),
+      segments,
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Fetch and parse captions from YouTube.
+ * Tries JSON3 format first, falls back to original URL (usually XML).
+ */
+async function fetchYouTubeCaptions(track: CaptionTrack): Promise<{ text: string; segments: TranscriptSegment[] } | null> {
+  // Try JSON3 format first (easier to parse)
+  try {
+    const json3Url = new URL(track.baseUrl)
+    json3Url.searchParams.set('fmt', 'json3')
+
+    debugLog('Fetching captions (JSON3) from:', json3Url.toString().slice(0, 100))
+
+    const response = await fetch(json3Url.toString(), {
+      credentials: 'include',
+    })
+
+    if (response.ok) {
+      const text = await response.text()
+      if (text.trim().startsWith('{')) {
+        const result = parseJson3Captions(text)
+        if (result) {
+          debugLog('Successfully parsed JSON3 captions')
+          return result
+        }
+      }
+    }
+  } catch (err) {
+    debugLog('JSON3 fetch failed, trying original URL:', err)
+  }
+
+  // Fall back to original URL (usually XML format)
+  try {
+    debugLog('Fetching captions (original) from:', track.baseUrl.slice(0, 100))
+
+    const response = await fetch(track.baseUrl, {
+      credentials: 'include',
+    })
+
+    if (!response.ok) {
+      debugLog('Caption fetch failed:', response.status)
+      return null
+    }
+
+    const text = await response.text()
+
+    // Try XML parsing
+    const xmlResult = parseTimedTextXml(text)
+    if (xmlResult) {
+      debugLog('Successfully parsed XML captions')
+      return xmlResult
+    }
+
+    // Maybe it's JSON after all
+    if (text.trim().startsWith('{') || text.trim().startsWith('[')) {
+      const jsonResult = parseJson3Captions(text)
+      if (jsonResult) return jsonResult
+    }
+
+    debugLog('Could not parse caption response')
+    return null
+  } catch (err) {
+    debugLog('Caption fetch error:', err)
+    return null
+  }
+}
+
+/**
+ * Extract video duration from player response or video element.
+ */
+function extractVideoDuration(): number | null {
+  // Try from player response
+  const playerResponse = readFromPageContext('window.ytInitialPlayerResponse?.videoDetails?.lengthSeconds')
+  if (typeof playerResponse === 'string') {
+    const seconds = parseInt(playerResponse, 10)
+    if (Number.isFinite(seconds) && seconds > 0) return seconds
+  }
+  if (typeof playerResponse === 'number' && Number.isFinite(playerResponse)) {
+    return playerResponse
+  }
+
+  // Try from video element
+  const video = document.querySelector('video') as HTMLVideoElement | null
+  if (video && Number.isFinite(video.duration) && video.duration > 0) {
+    return Math.round(video.duration)
+  }
+
+  return null
+}
+
+/**
+ * Extract transcript from YouTube video captions.
+ */
+async function extractYouTubeTranscript(): Promise<YouTubeTranscriptResponse> {
+  debugLog('Starting YouTube transcript extraction')
+  debugLog('URL:', window.location.href)
+
+  const tracks = extractCaptionTracks()
+  debugLog('Found caption tracks:', tracks.length)
+
+  if (tracks.length === 0) {
+    return {
+      ok: false,
+      error: 'No captions available for this YouTube video',
+      reason: 'no_captions',
+    }
+  }
+
+  const selectedTrack = selectBestCaptionTrack(tracks)
+  if (!selectedTrack) {
+    return {
+      ok: false,
+      error: 'Could not select a caption track',
+      reason: 'no_captions',
+    }
+  }
+
+  debugLog('Selected track:', selectedTrack.languageCode, selectedTrack.kind || 'manual')
+
+  const captions = await fetchYouTubeCaptions(selectedTrack)
+  if (!captions) {
+    return {
+      ok: false,
+      error: 'Failed to fetch or parse YouTube captions',
+      reason: 'fetch_failed',
+    }
+  }
+
+  const durationSeconds = extractVideoDuration()
+
+  debugLog('Successfully extracted transcript:', { textLength: captions.text.length, segments: captions.segments.length })
+  return {
+    ok: true,
+    text: captions.text,
+    segments: captions.segments,
+    source: 'youtube-captions',
+    durationSeconds,
+  }
+}
+
+/**
  * Extract stats from DOM elements.
  */
 function extractStatsFromDOM(): { views: number | null; likes: number | null; comments: number | null; shares: number | null } {
@@ -360,39 +710,123 @@ function extractStatsFromDOM(): { views: number | null; likes: number | null; co
 
   if (isShorts) {
     // Shorts has a different layout - stats are in the action bar
-    // Look for like button with count
-    const actionButtons = document.querySelectorAll('ytd-reel-video-renderer[is-active] ytd-toggle-button-renderer, #actions ytd-toggle-button-renderer, ytd-shorts-player-controls button')
+    debugLog('Extracting stats for Shorts')
 
-    for (const btn of actionButtons) {
-      const ariaLabel = btn.getAttribute('aria-label') || ''
-      const text = btn.textContent || ''
+    // Find the active reel renderer
+    const activeReel = document.querySelector('ytd-reel-video-renderer[is-active]')
+    const searchRoot = activeReel || document
 
-      // Check aria-label for "like this video along with X other people"
-      const likeMatch = ariaLabel.match(/like.*?(\d[\d,]*[KMB]?)/i) || text.match(/^([\d,]+[KMB]?)$/i)
-      if (likeMatch && stats.likes === null) {
-        stats.likes = parseYouTubeNumber(likeMatch[1])
+    // Like button with count - multiple selectors for different layouts
+    const likeSelectors = [
+      '#like-button ytd-like-button-renderer',
+      '#like-button button',
+      'ytd-toggle-button-renderer[icon="LIKE"]',
+      '[aria-label*="like"][aria-label*="video"]',
+      'like-button-view-model',
+    ]
+
+    for (const selector of likeSelectors) {
+      const likeBtn = searchRoot.querySelector(selector)
+      if (likeBtn) {
+        const ariaLabel = likeBtn.getAttribute('aria-label') || ''
+        const text = likeBtn.textContent || ''
+
+        // Check aria-label for "like this video along with X other people"
+        const likeMatch = ariaLabel.match(/with\s*([\d,]+[KMB]?)\s*other/i)
+          || ariaLabel.match(/([\d,]+[KMB]?)\s*likes?/i)
+          || text.match(/^([\d,]+[KMB]?)$/i)
+        if (likeMatch && stats.likes === null) {
+          stats.likes = parseYouTubeNumber(likeMatch[1])
+          debugLog('Found likes:', stats.likes)
+        }
       }
+      if (stats.likes !== null) break
+    }
 
-      // Comments - look for comment count
-      const commentMatch = ariaLabel.match(/(\d[\d,]*[KMB]?)\s*comments?/i)
-      if (commentMatch && stats.comments === null) {
-        stats.comments = parseYouTubeNumber(commentMatch[1])
+    // Fallback: look for formatted-string with like count
+    if (stats.likes === null) {
+      const formattedStrings = searchRoot.querySelectorAll('yt-formatted-string, span[class*="yt-core-attributed-string"]')
+      for (const el of formattedStrings) {
+        const text = el.textContent?.trim() || ''
+        if (text.match(/^[\d,.]+[KMB]?$/i)) {
+          // Find what type of button this is near
+          const parent = el.closest('ytd-toggle-button-renderer, button, [role="button"]')
+          if (parent) {
+            const ariaLabel = parent.getAttribute('aria-label')?.toLowerCase() || ''
+            if (ariaLabel.includes('like') && !ariaLabel.includes('dislike') && stats.likes === null) {
+              stats.likes = parseYouTubeNumber(text)
+              debugLog('Found likes from formatted-string:', stats.likes)
+            } else if (ariaLabel.includes('comment') && stats.comments === null) {
+              stats.comments = parseYouTubeNumber(text)
+              debugLog('Found comments from formatted-string:', stats.comments)
+            } else if (ariaLabel.includes('share') && stats.shares === null) {
+              stats.shares = parseYouTubeNumber(text)
+              debugLog('Found shares from formatted-string:', stats.shares)
+            }
+          }
+        }
       }
     }
 
-    // Look for view count in various places
-    const viewElements = document.querySelectorAll(
-      'ytd-reel-video-renderer[is-active] .ytd-reel-video-renderer, ' +
-      'span.view-count, .ytd-video-view-count-renderer, ' +
-      '#info-container span'
-    )
-    for (const el of viewElements) {
-      const text = el.textContent || ''
-      const viewMatch = text.match(/([\d,.]+[KMB]?)\s*views?/i)
-      if (viewMatch && stats.views === null) {
-        stats.views = parseYouTubeNumber(viewMatch[1])
+    // Comment count
+    const commentSelectors = [
+      '#comments-button ytd-button-renderer',
+      '#comments-button button',
+      '[aria-label*="comment"]',
+    ]
+
+    for (const selector of commentSelectors) {
+      const commentBtn = searchRoot.querySelector(selector)
+      if (commentBtn) {
+        const ariaLabel = commentBtn.getAttribute('aria-label') || ''
+        const text = commentBtn.textContent || ''
+
+        const commentMatch = ariaLabel.match(/([\d,]+[KMB]?)\s*comments?/i)
+          || text.match(/^([\d,]+[KMB]?)$/i)
+        if (commentMatch && stats.comments === null) {
+          stats.comments = parseYouTubeNumber(commentMatch[1])
+          debugLog('Found comments:', stats.comments)
+        }
+      }
+      if (stats.comments !== null) break
+    }
+
+    // View count - check multiple locations
+    const viewSelectors = [
+      'ytd-reel-video-renderer[is-active] .ytd-reel-player-overlay-renderer',
+      'ytd-reel-video-renderer[is-active] #factoids',
+      '.reel-video-in-sequence[is-active] .factoid',
+      '#info-container span',
+      '.view-count',
+      'span[class*="view"]',
+    ]
+
+    for (const selector of viewSelectors) {
+      const viewEls = document.querySelectorAll(selector)
+      for (const el of viewEls) {
+        const text = el.textContent || ''
+        const viewMatch = text.match(/([\d,.]+[KMB]?)\s*views?/i)
+        if (viewMatch && stats.views === null) {
+          stats.views = parseYouTubeNumber(viewMatch[1])
+          debugLog('Found views:', stats.views)
+          break
+        }
+      }
+      if (stats.views !== null) break
+    }
+
+    // Share count (YouTube doesn't always show this, but try)
+    if (stats.shares === null) {
+      const shareBtn = searchRoot.querySelector('[aria-label*="Share"], #share-button')
+      if (shareBtn) {
+        const ariaLabel = shareBtn.getAttribute('aria-label') || ''
+        const shareMatch = ariaLabel.match(/([\d,]+[KMB]?)\s*shares?/i)
+        if (shareMatch) {
+          stats.shares = parseYouTubeNumber(shareMatch[1])
+        }
       }
     }
+
   } else {
     // Regular YouTube video
     // View count
@@ -427,7 +861,91 @@ function extractStatsFromDOM(): { views: number | null; likes: number | null; co
     }
   }
 
+  debugLog('Extracted DOM stats:', stats)
   return stats
+}
+
+/**
+ * Check if the current video is an advertisement.
+ * YouTube Shorts ads have specific indicators.
+ */
+function isCurrentVideoAd(): YouTubeAdCheckResponse {
+  debugLog('Checking if current video is an ad')
+
+  // Method 1: Check for "Ad" badge in the video overlay
+  const adBadges = [
+    // Standard ad badges
+    document.querySelector('.ytp-ad-badge'),
+    document.querySelector('.ytp-ad-text'),
+    document.querySelector('[class*="ad-badge"]'),
+    document.querySelector('.ad-showing'),
+    // Shorts specific
+    document.querySelector('ytd-reel-video-renderer[is-active] .ytd-ad-slot-renderer'),
+    document.querySelector('ytd-reel-video-renderer[is-active] [class*="AdBadge"]'),
+    document.querySelector('[data-ad-slot]'),
+  ]
+
+  for (const badge of adBadges) {
+    if (badge) {
+      debugLog('Found ad badge element')
+      return { isAd: true, reason: 'Ad badge detected' }
+    }
+  }
+
+  // Method 2: Check for "Ad" text in the player
+  const adTextIndicators = [
+    'Ad · ',
+    'Ad ·',
+    'Sponsored',
+    'Advertisement',
+  ]
+
+  const playerOverlay = document.querySelector('.ytp-chrome-top, .ytp-title, ytd-reel-video-renderer[is-active]')
+  if (playerOverlay) {
+    const overlayText = playerOverlay.textContent || ''
+    for (const indicator of adTextIndicators) {
+      if (overlayText.includes(indicator)) {
+        debugLog('Found ad text indicator:', indicator)
+        return { isAd: true, reason: `Ad text found: ${indicator}` }
+      }
+    }
+  }
+
+  // Method 3: Check for ad-related elements in player state
+  const adElements = document.querySelectorAll('[class*="ytp-ad"], [class*="ad-interrupting"], [class*="ad-showing"]')
+  if (adElements.length > 0) {
+    debugLog('Found ad-related class')
+    return { isAd: true, reason: 'Ad class detected' }
+  }
+
+  // Method 4: Check video player data attributes
+  const player = document.querySelector('#movie_player, ytd-player')
+  if (player) {
+    const classList = player.className || ''
+    if (classList.includes('ad-showing') || classList.includes('ad-interrupting')) {
+      debugLog('Player showing ad')
+      return { isAd: true, reason: 'Player in ad state' }
+    }
+  }
+
+  // Method 5: For Shorts, check the active reel renderer
+  const activeReel = document.querySelector('ytd-reel-video-renderer[is-active]')
+  if (activeReel) {
+    const reelText = activeReel.textContent || ''
+    if (reelText.includes('Sponsored') || reelText.includes('Ad ·')) {
+      debugLog('Shorts reel is sponsored')
+      return { isAd: true, reason: 'Sponsored Shorts content' }
+    }
+
+    // Check for ad slot renderer inside active reel
+    if (activeReel.querySelector('ytd-ad-slot-renderer, [class*="AdSlot"]')) {
+      debugLog('Ad slot found in active reel')
+      return { isAd: true, reason: 'Ad slot in reel' }
+    }
+  }
+
+  debugLog('Not an ad')
+  return { isAd: false }
 }
 
 /**
@@ -548,9 +1066,9 @@ export default defineContentScript({
 
     chrome.runtime.onMessage.addListener(
       (
-        message: YouTubeMetadataRequest | YouTubeScrollNextRequest,
+        message: YouTubeMetadataRequest | YouTubeScrollNextRequest | YouTubeTranscriptRequest | YouTubeAdCheckRequest,
         _sender,
-        sendResponse: (response: YouTubeMetadataResponse | YouTubeScrollNextResponse) => void
+        sendResponse: (response: YouTubeMetadataResponse | YouTubeScrollNextResponse | YouTubeTranscriptResponse | YouTubeAdCheckResponse) => void
       ) => {
         if (message?.type === 'youtube-metadata') {
           sendResponse(extractYouTubeMetadata())
@@ -559,6 +1077,34 @@ export default defineContentScript({
         if (message?.type === 'youtube-scroll-next') {
           sendResponse(scrollToNextShort())
           return false
+        }
+        if (message?.type === 'youtube-is-ad') {
+          sendResponse(isCurrentVideoAd())
+          return false
+        }
+        if (message?.type === 'youtube-transcript') {
+          // First check if it's an ad
+          const adCheck = isCurrentVideoAd()
+          if (adCheck.isAd) {
+            sendResponse({
+              ok: false,
+              error: `Skipping ad: ${adCheck.reason}`,
+              reason: 'is_ad',
+            })
+            return false
+          }
+
+          extractYouTubeTranscript()
+            .then(sendResponse)
+            .catch((err) => {
+              console.error('[YouTube Content Script] Transcript extraction error:', err)
+              sendResponse({
+                ok: false,
+                error: `Extraction failed: ${err instanceof Error ? err.message : String(err)}`,
+                reason: 'extraction_error',
+              })
+            })
+          return true // Keep channel open for async response
         }
         return undefined
       }
