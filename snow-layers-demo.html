@@ -1,0 +1,821 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Markham Snow Layers - January 2026</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(180deg, #0a1628 0%, #1a3a5c 30%, #2d5a7b 60%, #4a7c9b 100%);
+            min-height: 100vh;
+            color: white;
+            overflow-x: hidden;
+        }
+
+        .header {
+            text-align: center;
+            padding: 20px;
+            background: rgba(0,0,0,0.3);
+        }
+
+        .header h1 {
+            font-size: 1.8rem;
+            font-weight: 300;
+            margin-bottom: 5px;
+        }
+
+        .header .subtitle {
+            opacity: 0.7;
+            font-size: 0.9rem;
+        }
+
+        .main-container {
+            display: flex;
+            gap: 20px;
+            padding: 20px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .snow-profile {
+            flex: 2;
+            position: relative;
+        }
+
+        .info-panel {
+            flex: 1;
+            min-width: 300px;
+        }
+
+        /* Snow Cross Section */
+        .cross-section {
+            position: relative;
+            background: linear-gradient(180deg,
+                #1a3a5c 0%,
+                #2a4a6c 100%);
+            border-radius: 15px;
+            overflow: hidden;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .sky-section {
+            height: 120px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* Wind particles */
+        .wind-particle {
+            position: absolute;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent);
+            animation: wind-blow linear infinite;
+        }
+
+        @keyframes wind-blow {
+            0% { transform: translateX(-100px); opacity: 0; }
+            10% { opacity: 1; }
+            90% { opacity: 1; }
+            100% { transform: translateX(calc(100vw + 100px)); opacity: 0; }
+        }
+
+        /* Falling snow */
+        .falling-snow {
+            position: absolute;
+            background: white;
+            border-radius: 50%;
+            opacity: 0.8;
+            animation: snow-fall linear infinite;
+        }
+
+        @keyframes snow-fall {
+            0% { transform: translate(0, -10px); }
+            100% { transform: translate(var(--drift), 120px); }
+        }
+
+        .depth-scale {
+            position: absolute;
+            left: 10px;
+            top: 120px;
+            bottom: 60px;
+            width: 40px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            font-size: 0.75rem;
+            opacity: 0.7;
+        }
+
+        .depth-marker {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .depth-marker::before {
+            content: '';
+            width: 10px;
+            height: 1px;
+            background: rgba(255,255,255,0.5);
+        }
+
+        /* Snow Layers Container */
+        .snow-layers {
+            position: relative;
+            min-height: 400px;
+        }
+
+        .snow-layer {
+            position: relative;
+            width: 100%;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            overflow: hidden;
+        }
+
+        .snow-layer:hover {
+            filter: brightness(1.1);
+        }
+
+        .snow-layer.active {
+            outline: 2px solid #4CAF50;
+            outline-offset: -2px;
+        }
+
+        /* Layer textures */
+        .layer-texture {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            pointer-events: none;
+        }
+
+        /* Tomorrow's layer - Pack Snow */
+        .layer-tomorrow {
+            background: linear-gradient(180deg,
+                rgba(255,255,255,0.95) 0%,
+                rgba(240,245,255,0.9) 100%);
+            border-top: 3px dashed rgba(76, 175, 80, 0.8);
+            animation: pulse-border 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse-border {
+            0%, 100% { border-top-color: rgba(76, 175, 80, 0.8); }
+            50% { border-top-color: rgba(76, 175, 80, 0.3); }
+        }
+
+        .layer-tomorrow .layer-texture {
+            background: repeating-linear-gradient(
+                0deg,
+                transparent,
+                transparent 3px,
+                rgba(200,220,255,0.3) 3px,
+                rgba(200,220,255,0.3) 4px
+            );
+        }
+
+        /* Today's powder layer */
+        .layer-today {
+            background: linear-gradient(180deg,
+                rgba(250,252,255,0.98) 0%,
+                rgba(240,248,255,0.95) 100%);
+        }
+
+        .layer-today .layer-texture {
+            background:
+                radial-gradient(circle at 20% 30%, rgba(255,255,255,1) 0%, transparent 2px),
+                radial-gradient(circle at 60% 50%, rgba(255,255,255,1) 0%, transparent 1.5px),
+                radial-gradient(circle at 80% 20%, rgba(255,255,255,1) 0%, transparent 2px),
+                radial-gradient(circle at 40% 70%, rgba(255,255,255,1) 0%, transparent 1px);
+        }
+
+        /* Wind crust layer */
+        .layer-wind-crust {
+            background: linear-gradient(180deg,
+                rgba(200,215,230,0.98) 0%,
+                rgba(180,200,220,0.95) 100%);
+        }
+
+        .layer-wind-crust .layer-texture {
+            background: repeating-linear-gradient(
+                85deg,
+                transparent,
+                transparent 8px,
+                rgba(150,170,190,0.4) 8px,
+                rgba(150,170,190,0.4) 9px
+            );
+        }
+
+        /* Jan 19 layer - Dry snow */
+        .layer-jan19 {
+            background: linear-gradient(180deg,
+                rgba(235,245,255,0.95) 0%,
+                rgba(220,235,250,0.92) 100%);
+        }
+
+        /* Jan 16 layer - Settled snow */
+        .layer-jan16 {
+            background: linear-gradient(180deg,
+                rgba(210,225,240,0.95) 0%,
+                rgba(195,215,235,0.92) 100%);
+        }
+
+        /* Jan 15 base layer - Heavily compacted */
+        .layer-jan15 {
+            background: linear-gradient(180deg,
+                rgba(180,200,220,0.98) 0%,
+                rgba(160,185,210,0.95) 50%,
+                rgba(140,170,200,0.92) 100%);
+        }
+
+        .layer-jan15 .layer-texture {
+            background: repeating-linear-gradient(
+                0deg,
+                transparent,
+                transparent 6px,
+                rgba(120,150,180,0.2) 6px,
+                rgba(120,150,180,0.2) 8px
+            );
+        }
+
+        /* Ground */
+        .ground-layer {
+            background: linear-gradient(180deg,
+                #5a4a3a 0%,
+                #4a3a2a 50%,
+                #3a2a1a 100%);
+            height: 60px;
+        }
+
+        /* Sastrugi (wind ridges) on surface */
+        .sastrugi {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 100%;
+            pointer-events: none;
+        }
+
+        .sastrugi svg {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Layer label */
+        .layer-label {
+            position: absolute;
+            right: 15px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: rgba(0,0,0,0.4);
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            white-space: nowrap;
+        }
+
+        .layer-label.future {
+            background: rgba(76, 175, 80, 0.6);
+        }
+
+        /* Info Panel */
+        .info-card {
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 15px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .info-card h3 {
+            font-size: 1rem;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .total-depth {
+            font-size: 3rem;
+            font-weight: 200;
+            text-align: center;
+            margin: 10px 0;
+        }
+
+        .total-depth span {
+            font-size: 1.2rem;
+            opacity: 0.7;
+        }
+
+        .depth-breakdown {
+            font-size: 0.85rem;
+            opacity: 0.8;
+        }
+
+        /* Selected Layer Detail */
+        .selected-layer-detail {
+            display: none;
+        }
+
+        .selected-layer-detail.visible {
+            display: block;
+        }
+
+        .detail-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            font-size: 0.9rem;
+        }
+
+        .detail-row:last-child {
+            border-bottom: none;
+        }
+
+        .detail-label {
+            opacity: 0.7;
+        }
+
+        .snow-type-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+
+        .badge-powder {
+            background: rgba(135, 206, 250, 0.3);
+            color: #87CEEB;
+        }
+
+        .badge-pack {
+            background: rgba(100, 149, 237, 0.3);
+            color: #6495ED;
+        }
+
+        .badge-crust {
+            background: rgba(176, 196, 222, 0.3);
+            color: #B0C4DE;
+        }
+
+        .badge-settled {
+            background: rgba(119, 136, 153, 0.3);
+            color: #B8C8D8;
+        }
+
+        /* Legend */
+        .legend {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.8rem;
+        }
+
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+
+        /* Wind indicator */
+        .wind-indicator {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 8px;
+            margin-top: 10px;
+        }
+
+        .wind-arrow {
+            font-size: 1.5rem;
+            animation: wind-pulse 1s ease-in-out infinite;
+        }
+
+        @keyframes wind-pulse {
+            0%, 100% { transform: translateX(0); }
+            50% { transform: translateX(5px); }
+        }
+
+        /* Timeline */
+        .timeline {
+            position: relative;
+            padding-left: 20px;
+            margin-top: 10px;
+        }
+
+        .timeline::before {
+            content: '';
+            position: absolute;
+            left: 5px;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: rgba(255,255,255,0.2);
+        }
+
+        .timeline-event {
+            position: relative;
+            padding: 10px 0;
+            padding-left: 15px;
+            font-size: 0.85rem;
+        }
+
+        .timeline-event::before {
+            content: '';
+            position: absolute;
+            left: -4px;
+            top: 14px;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #4a7c9b;
+            border: 2px solid white;
+        }
+
+        .timeline-event.major::before {
+            background: #e74c3c;
+        }
+
+        .timeline-event.future::before {
+            background: #4CAF50;
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.4); }
+            50% { box-shadow: 0 0 0 8px rgba(76, 175, 80, 0); }
+        }
+
+        .timeline-date {
+            font-weight: 600;
+            color: #87CEEB;
+        }
+
+        .timeline-event.future .timeline-date {
+            color: #4CAF50;
+        }
+
+        /* Responsive */
+        @media (max-width: 900px) {
+            .main-container {
+                flex-direction: column;
+            }
+            .info-panel {
+                min-width: auto;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📍 Markham, Ontario - Snow Profile</h1>
+        <div class="subtitle">Cross-section of untouched snow layers • January 20-21, 2026</div>
+    </div>
+
+    <div class="main-container">
+        <div class="snow-profile">
+            <div class="cross-section">
+                <!-- Sky with wind and falling snow -->
+                <div class="sky-section" id="sky">
+                    <!-- Wind particles and snow added by JS -->
+                </div>
+
+                <!-- Depth Scale -->
+                <div class="depth-scale">
+                    <div class="depth-marker">0 cm</div>
+                    <div class="depth-marker">15 cm</div>
+                    <div class="depth-marker">30 cm</div>
+                    <div class="depth-marker">45 cm</div>
+                </div>
+
+                <!-- Snow Layers -->
+                <div class="snow-layers">
+                    <!-- Tomorrow's Layer (Preview) -->
+                    <div class="snow-layer layer-tomorrow" data-layer="tomorrow" style="height: 35px;">
+                        <div class="layer-texture"></div>
+                        <div class="sastrugi">
+                            <svg viewBox="0 0 800 35" preserveAspectRatio="none">
+                                <path d="M0,5 Q50,0 100,8 T200,5 T300,10 T400,3 T500,8 T600,5 T700,10 T800,5 L800,35 L0,35 Z"
+                                      fill="rgba(255,255,255,0.3)"/>
+                            </svg>
+                        </div>
+                        <div class="layer-label future">+5 cm Tomorrow (Jan 21)</div>
+                    </div>
+
+                    <!-- Today's Powder Snow -->
+                    <div class="snow-layer layer-today" data-layer="today" style="height: 20px;">
+                        <div class="layer-texture"></div>
+                        <div class="layer-label">~2 cm Today</div>
+                    </div>
+
+                    <!-- Wind Crust (formed by 46-58 km/h winds) -->
+                    <div class="snow-layer layer-wind-crust" data-layer="windcrust" style="height: 8px;">
+                        <div class="layer-texture"></div>
+                        <div class="layer-label">Wind Crust</div>
+                    </div>
+
+                    <!-- Jan 19 Snow Squall Layer -->
+                    <div class="snow-layer layer-jan19" data-layer="jan19" style="height: 35px;">
+                        <div class="layer-texture"></div>
+                        <div class="layer-label">5 cm (Jan 19)</div>
+                    </div>
+
+                    <!-- Jan 16 Additional Snow -->
+                    <div class="snow-layer layer-jan16" data-layer="jan16" style="height: 25px;">
+                        <div class="layer-texture"></div>
+                        <div class="layer-label">3 cm (Jan 16)</div>
+                    </div>
+
+                    <!-- Jan 15 Base Layer (Compacted from 45cm to ~28cm) -->
+                    <div class="snow-layer layer-jan15" data-layer="jan15" style="height: 180px;">
+                        <div class="layer-texture"></div>
+                        <div class="layer-label">~28 cm settled (Jan 15 storm)</div>
+                    </div>
+                </div>
+
+                <!-- Ground -->
+                <div class="ground-layer"></div>
+            </div>
+        </div>
+
+        <div class="info-panel">
+            <!-- Total Depth -->
+            <div class="info-card">
+                <h3>❄️ Total Snow Depth</h3>
+                <div class="total-depth">
+                    ~43 <span>cm</span>
+                    <div style="font-size: 1rem; opacity: 0.6;">→ 48 cm tomorrow</div>
+                </div>
+                <div class="depth-breakdown">
+                    <strong>Current:</strong> 28 + 3 + 5 + 0.5 + 2 = ~38.5 cm<br>
+                    <strong>Tomorrow:</strong> +5 cm pack snow = ~43.5 cm
+                </div>
+            </div>
+
+            <!-- Selected Layer Detail -->
+            <div class="info-card selected-layer-detail" id="layer-detail">
+                <h3>🔍 Layer Details</h3>
+                <div id="detail-content">
+                    <p style="opacity: 0.6; font-size: 0.9rem;">Click a layer to see details</p>
+                </div>
+            </div>
+
+            <!-- Wind Effects -->
+            <div class="info-card">
+                <h3>💨 Wind Effects</h3>
+                <div class="wind-indicator">
+                    <div class="wind-arrow">→</div>
+                    <div>
+                        <strong>WSW 46 km/h</strong><br>
+                        <span style="font-size: 0.8rem; opacity: 0.7;">Gusting to 58 km/h</span>
+                    </div>
+                </div>
+                <div style="margin-top: 15px; font-size: 0.85rem; opacity: 0.9;">
+                    <p><strong>Wind Crust:</strong> Hard, icy layer formed when strong winds compact the surface snow</p>
+                    <p style="margin-top: 8px;"><strong>Sastrugi:</strong> Wave-like ridges carved by wind visible on surface</p>
+                    <p style="margin-top: 8px;"><strong>Drifting:</strong> Snow redistributed, deeper in sheltered areas</p>
+                </div>
+            </div>
+
+            <!-- Legend -->
+            <div class="info-card">
+                <h3>🎨 Snow Types</h3>
+                <div class="legend">
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: rgba(250,252,255,0.95);"></div>
+                        <span>Powder (< -10°C)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: rgba(240,245,255,0.9);"></div>
+                        <span>Pack (~0°C)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: rgba(200,215,230,0.95);"></div>
+                        <span>Wind Crust</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: rgba(180,200,220,0.95);"></div>
+                        <span>Settled/Compacted</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Timeline -->
+            <div class="info-card">
+                <h3>📅 Snow Events</h3>
+                <div class="timeline">
+                    <div class="timeline-event future">
+                        <div class="timeline-date">Jan 21 (Tomorrow)</div>
+                        <div>5 cm pack snow @ -1°C</div>
+                    </div>
+                    <div class="timeline-event">
+                        <div class="timeline-date">Jan 20 (Today)</div>
+                        <div>Light snow ~2 cm @ -12°C (powder)<br>Strong winds form crust</div>
+                    </div>
+                    <div class="timeline-event">
+                        <div class="timeline-date">Jan 19</div>
+                        <div>Snow squalls 5 cm @ -6°C</div>
+                    </div>
+                    <div class="timeline-event">
+                        <div class="timeline-date">Jan 16</div>
+                        <div>Additional 2-4 cm</div>
+                    </div>
+                    <div class="timeline-event major">
+                        <div class="timeline-date">Jan 15 ⚠️</div>
+                        <div><strong>MAJOR STORM</strong><br>45 cm in Markham (record-breaking)</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Layer data
+        const layerData = {
+            tomorrow: {
+                name: "Tomorrow's Snow (Jan 21)",
+                date: "January 21, 2026",
+                depth: "5 cm (expected)",
+                temp: "-1°C",
+                type: "Pack Snow",
+                typeBadge: "badge-pack",
+                wind: "S 30 km/h",
+                description: "Wet, heavy snow forming near freezing. Great for snowballs, harder to shovel. Will add a fresh white layer on top.",
+                characteristics: ["High moisture content", "Large, clumpy flakes", "Sticks to surfaces", "Dense and heavy"]
+            },
+            today: {
+                name: "Today's Powder (Jan 20)",
+                date: "January 20, 2026",
+                depth: "~2 cm",
+                temp: "-12°C",
+                type: "Powder Snow",
+                typeBadge: "badge-powder",
+                wind: "WSW 46-58 km/h",
+                description: "Very light, fluffy snow formed in cold temperatures. The strong winds are blowing it around and forming a crust on the surface.",
+                characteristics: ["Low moisture content", "Light and fluffy", "Easily wind-blown", "Sparkly crystals"]
+            },
+            windcrust: {
+                name: "Wind Crust Layer",
+                date: "January 19-20, 2026",
+                depth: "~0.5 cm",
+                temp: "-12°C to -15°C",
+                type: "Wind Crust",
+                typeBadge: "badge-crust",
+                wind: "WSW 46-58 km/h (gusts)",
+                description: "Hard, icy layer formed when strong winds pack and sinter the snow surface. Acts as a barrier between layers. You can often walk on it without breaking through.",
+                characteristics: ["Very hard surface", "Wind-packed crystals", "Breakable under weight", "Distinct boundary"]
+            },
+            jan19: {
+                name: "Snow Squall Layer (Jan 19)",
+                date: "January 19, 2026",
+                depth: "5 cm",
+                temp: "-6°C",
+                type: "Dry Snow",
+                typeBadge: "badge-powder",
+                wind: "Variable, squalls",
+                description: "Quick-moving snow squalls deposited this layer. Moderately cold temperatures produced relatively dry snow that's now beginning to settle.",
+                characteristics: ["Medium density", "Settling over time", "Dry but not fluffy", "Good insulation"]
+            },
+            jan16: {
+                name: "Post-Storm Snow (Jan 16)",
+                date: "January 16, 2026",
+                depth: "~3 cm (originally 2-4 cm)",
+                temp: "~-3°C",
+                type: "Settled Snow",
+                typeBadge: "badge-settled",
+                wind: "Light",
+                description: "Additional snow that fell after the major storm. Has been settling and compacting for 4 days. Bonding with the layer below.",
+                characteristics: ["Partially compacted", "Bonded crystals", "Increased density", "Stable layer"]
+            },
+            jan15: {
+                name: "Base Layer - Major Storm (Jan 15)",
+                date: "January 15, 2026",
+                depth: "~28 cm (originally 45 cm)",
+                temp: "-2°C to 0°C",
+                type: "Heavily Compacted",
+                typeBadge: "badge-settled",
+                wind: "Strong during storm",
+                description: "The record-breaking storm that dumped 45 cm on Markham. Originally heavy, wet snow that has now compacted significantly over 5 days. Lost ~38% of its depth through settling and metamorphism.",
+                characteristics: ["Very dense base", "Rounded crystals", "Strong foundation", "~38% settled"]
+            }
+        };
+
+        // Handle layer clicks
+        document.querySelectorAll('.snow-layer').forEach(layer => {
+            layer.addEventListener('click', function() {
+                // Remove active class from all
+                document.querySelectorAll('.snow-layer').forEach(l => l.classList.remove('active'));
+                // Add to clicked
+                this.classList.add('active');
+
+                const layerId = this.dataset.layer;
+                const data = layerData[layerId];
+
+                const detailPanel = document.getElementById('layer-detail');
+                const detailContent = document.getElementById('detail-content');
+
+                detailPanel.classList.add('visible');
+
+                detailContent.innerHTML = `
+                    <div class="detail-row">
+                        <span class="detail-label">Layer</span>
+                        <span><strong>${data.name}</strong></span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Date</span>
+                        <span>${data.date}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Depth</span>
+                        <span>${data.depth}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Temperature</span>
+                        <span>${data.temp}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Snow Type</span>
+                        <span class="snow-type-badge ${data.typeBadge}">${data.type}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Wind</span>
+                        <span>${data.wind}</span>
+                    </div>
+                    <div style="margin-top: 15px; font-size: 0.85rem; opacity: 0.9;">
+                        <p>${data.description}</p>
+                        <ul style="margin-top: 10px; padding-left: 20px;">
+                            ${data.characteristics.map(c => `<li>${c}</li>`).join('')}
+                        </ul>
+                    </div>
+                `;
+            });
+        });
+
+        // Create wind particles
+        const sky = document.getElementById('sky');
+
+        function createWindParticle() {
+            const particle = document.createElement('div');
+            particle.className = 'wind-particle';
+            particle.style.width = (Math.random() * 60 + 20) + 'px';
+            particle.style.top = (Math.random() * 100) + 'px';
+            particle.style.animationDuration = (Math.random() * 1 + 0.5) + 's';
+            sky.appendChild(particle);
+
+            setTimeout(() => particle.remove(), 2000);
+        }
+
+        // Create falling snow (light, wind-blown)
+        function createFallingSnow() {
+            const snow = document.createElement('div');
+            snow.className = 'falling-snow';
+            const size = Math.random() * 3 + 1;
+            snow.style.width = size + 'px';
+            snow.style.height = size + 'px';
+            snow.style.left = (Math.random() * 100) + '%';
+            snow.style.setProperty('--drift', (Math.random() * 100 + 50) + 'px'); // Wind drift to the right
+            snow.style.animationDuration = (Math.random() * 1.5 + 1) + 's';
+            sky.appendChild(snow);
+
+            setTimeout(() => snow.remove(), 3000);
+        }
+
+        // Animation loops
+        setInterval(createWindParticle, 100);
+        setInterval(createFallingSnow, 150);
+
+        // Initial particles
+        for (let i = 0; i < 20; i++) {
+            setTimeout(createWindParticle, Math.random() * 500);
+            setTimeout(createFallingSnow, Math.random() * 500);
+        }
+
+        // Auto-select tomorrow's layer on load
+        setTimeout(() => {
+            document.querySelector('[data-layer="jan15"]').click();
+        }, 500);
+    </script>
+</body>
+</html>

@@ -51,7 +51,7 @@ type TikTokTranscriptResponse =
       source: 'tiktok-captions'
       durationSeconds: number | null
     }
-  | { ok: false; error: string; reason: 'no_captions' | 'fetch_failed' | 'parse_failed' | 'extraction_error' | 'is_ad' }
+  | { ok: false; error: string; reason: 'no_captions' | 'fetch_failed' | 'parse_failed' | 'extraction_error' | 'is_ad' | 'is_music' | 'not_english' }
 
 type TikTokMetadataRequest = { type: 'tiktok-metadata' }
 type TikTokScrollNextRequest = { type: 'tiktok-scroll-next' }
@@ -876,8 +876,13 @@ function selectBestSubtitleInfo(subtitleInfos: TikTokSubtitleInfo[]): TikTokSubt
   })
   const candidates = nonExpired.length > 0 ? nonExpired : subtitleInfos
 
+  // ONLY return English subtitles - skip non-English content entirely
   const englishInfo = candidates.find((info) => isEnglishSubtitle(info.languageCode))
-  return englishInfo ?? candidates[0] ?? null
+  if (!englishInfo) {
+    debugLog('No English subtitles available, skipping non-English content')
+    return null
+  }
+  return englishInfo
 }
 
 /**
@@ -1209,6 +1214,18 @@ async function extractTranscript(): Promise<TikTokTranscriptResponse> {
   }
 
   debugLog('Fetching captions from:', subtitleInfos.map((s) => ({ lang: s.languageCode, format: s.format })))
+
+  // Check if there are English subtitles before fetching
+  const hasEnglish = subtitleInfos.some((info) => isEnglishSubtitle(info.languageCode))
+  if (!hasEnglish) {
+    debugLog('No English captions available - skipping non-English content')
+    return {
+      ok: false,
+      error: 'No English captions available - skipping non-English content',
+      reason: 'not_english',
+    }
+  }
+
   const captions = await fetchTikTokCaptions(subtitleInfos)
 
   if (!captions) {

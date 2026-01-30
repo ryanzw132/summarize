@@ -29,7 +29,7 @@ type YouTubeTranscriptResponse =
       source: 'youtube-captions'
       durationSeconds: number | null
     }
-  | { ok: false; error: string; reason: 'no_captions' | 'fetch_failed' | 'parse_failed' | 'extraction_error' | 'is_ad' }
+  | { ok: false; error: string; reason: 'no_captions' | 'fetch_failed' | 'parse_failed' | 'extraction_error' | 'is_ad' | 'is_music' | 'not_english' }
 
 type YouTubeAdCheckRequest = { type: 'youtube-is-ad' }
 type YouTubeAdCheckResponse = { isAd: boolean; reason?: string }
@@ -460,6 +460,7 @@ function extractCaptionTracks(): CaptionTrack[] {
 function selectBestCaptionTrack(tracks: CaptionTrack[]): CaptionTrack | null {
   if (tracks.length === 0) return null
 
+  // ONLY select English tracks - skip non-English content entirely
   // Prefer English manual captions
   const englishManual = tracks.find(t =>
     t.languageCode.startsWith('en') && t.kind !== 'asr'
@@ -470,12 +471,9 @@ function selectBestCaptionTrack(tracks: CaptionTrack[]): CaptionTrack | null {
   const english = tracks.find(t => t.languageCode.startsWith('en'))
   if (english) return english
 
-  // Then any manual captions
-  const manual = tracks.find(t => t.kind !== 'asr')
-  if (manual) return manual
-
-  // Finally, first available
-  return tracks[0]
+  // No English available - return null to skip this video
+  debugLog('No English captions available, skipping video')
+  return null
 }
 
 /**
@@ -650,11 +648,65 @@ function extractVideoDuration(): number | null {
 }
 
 /**
+ * Detect if the current video is a music video.
+ * Music videos typically have song lyrics as captions and we want to skip them.
+ */
+function isMusicVideo(): boolean {
+  // Check video category from player response
+  const category = readFromPageContext('window.ytInitialPlayerResponse?.microformat?.playerMicroformatRenderer?.category')
+  if (category === 'Music') {
+    debugLog('Detected music video from category')
+    return true
+  }
+
+  // Check for music-related keywords in title
+  const title = readFromPageContext('window.ytInitialPlayerResponse?.videoDetails?.title') as string | undefined
+  if (title) {
+    const lowerTitle = title.toLowerCase()
+    // Common music video indicators
+    const musicIndicators = [
+      'official music video', 'official video', 'official audio',
+      'lyrics', 'lyric video', '(audio)', '[audio]',
+      'music video', 'mv', 'official mv',
+      'feat.', 'ft.', 'remix', 'cover song',
+    ]
+    for (const indicator of musicIndicators) {
+      if (lowerTitle.includes(indicator)) {
+        debugLog('Detected music video from title:', indicator)
+        return true
+      }
+    }
+  }
+
+  // Check for music channel/artist indicators
+  const channelName = readFromPageContext('window.ytInitialPlayerResponse?.videoDetails?.author') as string | undefined
+  if (channelName) {
+    const lowerChannel = channelName.toLowerCase()
+    // Common music label/artist channel patterns
+    if (lowerChannel.includes('vevo') || lowerChannel.includes('records') || lowerChannel.includes(' music')) {
+      debugLog('Detected music video from channel:', channelName)
+      return true
+    }
+  }
+
+  return false
+}
+
+/**
  * Extract transcript from YouTube video captions.
  */
 async function extractYouTubeTranscript(): Promise<YouTubeTranscriptResponse> {
   debugLog('Starting YouTube transcript extraction')
   debugLog('URL:', window.location.href)
+
+  // Check if this is a music video - skip if so
+  if (isMusicVideo()) {
+    return {
+      ok: false,
+      error: 'Music video detected - skipping',
+      reason: 'is_music',
+    }
+  }
 
   const tracks = extractCaptionTracks()
   debugLog('Found caption tracks:', tracks.length)
@@ -669,10 +721,11 @@ async function extractYouTubeTranscript(): Promise<YouTubeTranscriptResponse> {
 
   const selectedTrack = selectBestCaptionTrack(tracks)
   if (!selectedTrack) {
+    // No English track available
     return {
       ok: false,
-      error: 'Could not select a caption track',
-      reason: 'no_captions',
+      error: 'No English captions available - skipping non-English content',
+      reason: 'not_english',
     }
   }
 
@@ -709,96 +762,92 @@ function extractStatsFromDOM(): { views: number | null; likes: number | null; co
   const isShorts = window.location.pathname.startsWith('/shorts/')
 
   if (isShorts) {
-    // Shorts has a different layout - stats are in the action bar
+    // Shorts has a different layout - stats are in the action bar on the right
     debugLog('Extracting stats for Shorts')
 
     // Find the active reel renderer
     const activeReel = document.querySelector('ytd-reel-video-renderer[is-active]')
     const searchRoot = activeReel || document
 
-    // Like button with count - multiple selectors for different layouts
-    const likeSelectors = [
-      '#like-button ytd-like-button-renderer',
-      '#like-button button',
-      'ytd-toggle-button-renderer[icon="LIKE"]',
-      '[aria-label*="like"][aria-label*="video"]',
-      'like-button-view-model',
-    ]
+    // YouTube Shorts shows stats as text inside the action buttons
+    // Each button has a span/text with the count
 
-    for (const selector of likeSelectors) {
-      const likeBtn = searchRoot.querySelector(selector)
-      if (likeBtn) {
-        const ariaLabel = likeBtn.getAttribute('aria-label') || ''
-        const text = likeBtn.textContent || ''
+    // Method 1: Look for action button containers and extract text directly
+    const actionButtons = searchRoot.querySelectorAll('#actions button, #actions [role="button"], ytd-reel-player-overlay-renderer button')
+    for (const btn of actionButtons) {
+      const ariaLabel = btn.getAttribute('aria-label')?.toLowerCase() || ''
+      const allText = btn.textContent?.trim() || ''
 
-        // Check aria-label for "like this video along with X other people"
-        const likeMatch = ariaLabel.match(/with\s*([\d,]+[KMB]?)\s*other/i)
-          || ariaLabel.match(/([\d,]+[KMB]?)\s*likes?/i)
-          || text.match(/^([\d,]+[KMB]?)$/i)
-        if (likeMatch && stats.likes === null) {
-          stats.likes = parseYouTubeNumber(likeMatch[1])
-          debugLog('Found likes:', stats.likes)
+      // Extract just the number from the button text
+      const numberMatch = allText.match(/^([\d,.]+[KMB]?)/i)
+      const count = numberMatch ? parseYouTubeNumber(numberMatch[1]) : null
+
+      if (count !== null) {
+        if (ariaLabel.includes('like') && !ariaLabel.includes('dislike') && stats.likes === null) {
+          stats.likes = count
+          debugLog('Found likes from action button:', count)
+        } else if (ariaLabel.includes('comment') && stats.comments === null) {
+          stats.comments = count
+          debugLog('Found comments from action button:', count)
+        } else if (ariaLabel.includes('share') && stats.shares === null) {
+          stats.shares = count
+          debugLog('Found shares from action button:', count)
         }
       }
-      if (stats.likes !== null) break
+
+      // Also check aria-label for counts embedded in the label
+      if (stats.likes === null && ariaLabel.includes('like')) {
+        const likeMatch = ariaLabel.match(/with\s*([\d,]+[KMB]?)\s*other/i)
+          || ariaLabel.match(/([\d,]+[KMB]?)\s*likes?/i)
+        if (likeMatch) {
+          stats.likes = parseYouTubeNumber(likeMatch[1])
+          debugLog('Found likes from aria-label:', stats.likes)
+        }
+      }
+      if (stats.comments === null && ariaLabel.includes('comment')) {
+        const commentMatch = ariaLabel.match(/([\d,]+[KMB]?)\s*comments?/i)
+        if (commentMatch) {
+          stats.comments = parseYouTubeNumber(commentMatch[1])
+          debugLog('Found comments from aria-label:', stats.comments)
+        }
+      }
     }
 
-    // Fallback: look for formatted-string with like count
-    if (stats.likes === null) {
-      const formattedStrings = searchRoot.querySelectorAll('yt-formatted-string, span[class*="yt-core-attributed-string"]')
-      for (const el of formattedStrings) {
+    // Method 2: Look for spans/text within known button IDs
+    const buttonIds = ['#like-button', '#dislike-button', '#comments-button', '#share-button']
+    for (const id of buttonIds) {
+      const container = searchRoot.querySelector(id)
+      if (!container) continue
+
+      // Find text elements within
+      const textEls = container.querySelectorAll('span, yt-formatted-string')
+      for (const el of textEls) {
         const text = el.textContent?.trim() || ''
         if (text.match(/^[\d,.]+[KMB]?$/i)) {
-          // Find what type of button this is near
-          const parent = el.closest('ytd-toggle-button-renderer, button, [role="button"]')
-          if (parent) {
-            const ariaLabel = parent.getAttribute('aria-label')?.toLowerCase() || ''
-            if (ariaLabel.includes('like') && !ariaLabel.includes('dislike') && stats.likes === null) {
-              stats.likes = parseYouTubeNumber(text)
-              debugLog('Found likes from formatted-string:', stats.likes)
-            } else if (ariaLabel.includes('comment') && stats.comments === null) {
-              stats.comments = parseYouTubeNumber(text)
-              debugLog('Found comments from formatted-string:', stats.comments)
-            } else if (ariaLabel.includes('share') && stats.shares === null) {
-              stats.shares = parseYouTubeNumber(text)
-              debugLog('Found shares from formatted-string:', stats.shares)
+          const count = parseYouTubeNumber(text)
+          if (count !== null) {
+            if (id === '#like-button' && stats.likes === null) {
+              stats.likes = count
+              debugLog('Found likes from #like-button:', count)
+            } else if (id === '#comments-button' && stats.comments === null) {
+              stats.comments = count
+              debugLog('Found comments from #comments-button:', count)
+            } else if (id === '#share-button' && stats.shares === null) {
+              stats.shares = count
+              debugLog('Found shares from #share-button:', count)
             }
           }
         }
       }
     }
 
-    // Comment count
-    const commentSelectors = [
-      '#comments-button ytd-button-renderer',
-      '#comments-button button',
-      '[aria-label*="comment"]',
-    ]
-
-    for (const selector of commentSelectors) {
-      const commentBtn = searchRoot.querySelector(selector)
-      if (commentBtn) {
-        const ariaLabel = commentBtn.getAttribute('aria-label') || ''
-        const text = commentBtn.textContent || ''
-
-        const commentMatch = ariaLabel.match(/([\d,]+[KMB]?)\s*comments?/i)
-          || text.match(/^([\d,]+[KMB]?)$/i)
-        if (commentMatch && stats.comments === null) {
-          stats.comments = parseYouTubeNumber(commentMatch[1])
-          debugLog('Found comments:', stats.comments)
-        }
-      }
-      if (stats.comments !== null) break
-    }
-
-    // View count - check multiple locations
+    // Method 3: Look for view count in the video overlay/title area
     const viewSelectors = [
       'ytd-reel-video-renderer[is-active] .ytd-reel-player-overlay-renderer',
       'ytd-reel-video-renderer[is-active] #factoids',
       '.reel-video-in-sequence[is-active] .factoid',
       '#info-container span',
       '.view-count',
-      'span[class*="view"]',
     ]
 
     for (const selector of viewSelectors) {
@@ -813,18 +862,6 @@ function extractStatsFromDOM(): { views: number | null; likes: number | null; co
         }
       }
       if (stats.views !== null) break
-    }
-
-    // Share count (YouTube doesn't always show this, but try)
-    if (stats.shares === null) {
-      const shareBtn = searchRoot.querySelector('[aria-label*="Share"], #share-button')
-      if (shareBtn) {
-        const ariaLabel = shareBtn.getAttribute('aria-label') || ''
-        const shareMatch = ariaLabel.match(/([\d,]+[KMB]?)\s*shares?/i)
-        if (shareMatch) {
-          stats.shares = parseYouTubeNumber(shareMatch[1])
-        }
-      }
     }
 
   } else {

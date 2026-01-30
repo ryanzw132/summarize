@@ -1356,10 +1356,18 @@ async function tryContentScriptExtraction(
       console.log('[Transcript] YouTube captions extracted successfully, length:', response.text.length)
       return { text: response.text, source: 'youtube-captions' }
     } else if (!response.ok) {
-      // Check if it's an ad - skip without error
+      // Check for skip reasons - ad, music, or non-English
       if (response.reason === 'is_ad') {
         console.log('[Transcript] YouTube video is an ad, skipping:', response.error)
         return { isAd: true, reason: response.error }
+      }
+      if (response.reason === 'is_music') {
+        console.log('[Transcript] YouTube video is music, skipping:', response.error)
+        return { isAd: true, reason: 'Music video - skipped' }
+      }
+      if (response.reason === 'not_english') {
+        console.log('[Transcript] YouTube video is not English, skipping:', response.error)
+        return { isAd: true, reason: 'Non-English video - skipped' }
       }
       console.log('[Transcript] YouTube content script:', response.reason, '-', response.error)
       createDiagnostic('ERR_NO_CAPTIONS', `YouTube: ${response.reason}`, response.error)
@@ -1381,10 +1389,18 @@ async function tryContentScriptExtraction(
       console.log('[Transcript] TikTok captions extracted successfully, length:', response.text.length)
       return { text: response.text, source: 'tiktok-captions' }
     } else if (!response.ok) {
-      // Check if it's an ad - skip without error
+      // Check for skip reasons - ad, music, or non-English
       if (response.reason === 'is_ad') {
         console.log('[Transcript] TikTok video is an ad, skipping:', response.error)
         return { isAd: true, reason: response.error }
+      }
+      if (response.reason === 'is_music') {
+        console.log('[Transcript] TikTok video is music, skipping:', response.error)
+        return { isAd: true, reason: 'Music video - skipped' }
+      }
+      if (response.reason === 'not_english') {
+        console.log('[Transcript] TikTok video is not English, skipping:', response.error)
+        return { isAd: true, reason: 'Non-English video - skipped' }
       }
       console.log('[Transcript] TikTok content script:', response.reason, '-', response.error)
       createDiagnostic('ERR_NO_CAPTIONS', `TikTok: ${response.reason}`, response.error)

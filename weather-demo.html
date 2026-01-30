@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Markham Weather - January 21, 2026</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(180deg, #1a1a2e 0%, #16213e 50%, #1a1a2e 100%);
+            min-height: 100vh;
+            overflow: hidden;
+            color: white;
+        }
+
+        .snow-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 1;
+        }
+
+        .snowflake {
+            position: absolute;
+            background: white;
+            border-radius: 50%;
+            opacity: 0.8;
+            animation: fall linear infinite;
+        }
+
+        /* Pack snow - larger, heavier flakes that fall faster */
+        .pack-snow .snowflake {
+            box-shadow: 0 0 5px rgba(255,255,255,0.5);
+        }
+
+        @keyframes fall {
+            0% {
+                transform: translateY(-10px) rotate(0deg);
+            }
+            100% {
+                transform: translateY(100vh) rotate(360deg);
+            }
+        }
+
+        .weather-card {
+            position: relative;
+            z-index: 2;
+            max-width: 500px;
+            margin: 50px auto;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .location {
+            font-size: 1.5rem;
+            font-weight: 300;
+            margin-bottom: 5px;
+        }
+
+        .date {
+            font-size: 0.9rem;
+            opacity: 0.7;
+            margin-bottom: 20px;
+        }
+
+        .temp-display {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 20px 0;
+        }
+
+        .temperature {
+            font-size: 5rem;
+            font-weight: 200;
+        }
+
+        .temp-unit {
+            font-size: 2rem;
+            vertical-align: top;
+            opacity: 0.7;
+        }
+
+        .condition {
+            text-align: center;
+            font-size: 1.3rem;
+            margin-bottom: 30px;
+        }
+
+        .condition-icon {
+            font-size: 3rem;
+            margin-bottom: 10px;
+        }
+
+        .details {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+        }
+
+        .detail-item {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        .detail-label {
+            font-size: 0.8rem;
+            opacity: 0.7;
+            margin-bottom: 5px;
+        }
+
+        .detail-value {
+            font-size: 1.2rem;
+            font-weight: 500;
+        }
+
+        .snow-type-card {
+            position: relative;
+            z-index: 2;
+            max-width: 500px;
+            margin: 20px auto;
+            background: rgba(100, 149, 237, 0.2);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 25px;
+            border: 1px solid rgba(100, 149, 237, 0.3);
+        }
+
+        .snow-type-title {
+            font-size: 1.2rem;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .snow-comparison {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-top: 15px;
+        }
+
+        .snow-type {
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        .snow-type.active {
+            background: rgba(255, 255, 255, 0.2);
+            border: 2px solid #4CAF50;
+        }
+
+        .snow-type.inactive {
+            background: rgba(255, 255, 255, 0.05);
+            opacity: 0.5;
+        }
+
+        .snow-type h3 {
+            margin-bottom: 10px;
+        }
+
+        .snow-type p {
+            font-size: 0.85rem;
+            opacity: 0.8;
+        }
+
+        .characteristics {
+            margin-top: 15px;
+            padding: 15px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+        }
+
+        .characteristics h4 {
+            margin-bottom: 10px;
+            color: #4CAF50;
+        }
+
+        .characteristics ul {
+            list-style: none;
+            font-size: 0.9rem;
+        }
+
+        .characteristics li {
+            padding: 5px 0;
+            padding-left: 20px;
+            position: relative;
+        }
+
+        .characteristics li::before {
+            content: "❄";
+            position: absolute;
+            left: 0;
+        }
+
+        .ground {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 60px;
+            background: linear-gradient(180deg, rgba(255,255,255,0.3) 0%, rgba(255,255,255,0.8) 100%);
+            z-index: 0;
+        }
+
+        .accumulation {
+            position: fixed;
+            bottom: 10px;
+            right: 20px;
+            z-index: 3;
+            background: rgba(0,0,0,0.5);
+            padding: 10px 20px;
+            border-radius: 10px;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="snow-container pack-snow" id="snow-container"></div>
+
+    <div class="weather-card">
+        <div class="location">📍 Markham, Ontario, Canada</div>
+        <div class="date">Wednesday, January 21, 2026</div>
+
+        <div class="temp-display">
+            <span class="temperature">-1</span>
+            <span class="temp-unit">°C</span>
+        </div>
+
+        <div class="condition">
+            <div class="condition-icon">🌨️</div>
+            <div>Snow - 5 cm expected</div>
+        </div>
+
+        <div class="details">
+            <div class="detail-item">
+                <div class="detail-label">Wind Chill (AM)</div>
+                <div class="detail-value">-17°C</div>
+            </div>
+            <div class="detail-item">
+                <div class="detail-label">Wind Chill (PM)</div>
+                <div class="detail-value">-9°C</div>
+            </div>
+            <div class="detail-item">
+                <div class="detail-label">Wind</div>
+                <div class="detail-value">S 30 km/h</div>
+            </div>
+            <div class="detail-item">
+                <div class="detail-label">Tonight</div>
+                <div class="detail-value">-6°C</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="snow-type-card">
+        <div class="snow-type-title">
+            <span>🔬</span>
+            <span>Snow Type Analysis</span>
+        </div>
+
+        <div class="snow-comparison">
+            <div class="snow-type active">
+                <h3>❄️ Pack Snow</h3>
+                <p>Forms near 0°C</p>
+                <p><strong>Tomorrow's type!</strong></p>
+            </div>
+            <div class="snow-type inactive">
+                <h3>✨ Powder Snow</h3>
+                <p>Forms below -10°C</p>
+                <p>Not tomorrow</p>
+            </div>
+        </div>
+
+        <div class="characteristics">
+            <h4>Pack Snow Characteristics:</h4>
+            <ul>
+                <li>Wet and heavy - harder to shovel</li>
+                <li>Great for snowballs & snowmen</li>
+                <li>Sticks to surfaces easily</li>
+                <li>Higher water content</li>
+                <li>Larger, clumpier flakes</li>
+            </ul>
+        </div>
+    </div>
+
+    <div class="ground"></div>
+    <div class="accumulation">
+        Accumulation: <span id="accumulation">0.0</span> cm
+    </div>
+
+    <script>
+        // Snow simulation - Pack snow style (larger, heavier flakes)
+        const container = document.getElementById('snow-container');
+        const accumulationEl = document.getElementById('accumulation');
+        let accumulation = 0;
+        const targetAccumulation = 5; // 5 cm expected
+
+        function createSnowflake() {
+            const snowflake = document.createElement('div');
+            snowflake.className = 'snowflake';
+
+            // Pack snow: larger flakes (3-8px), faster fall
+            const size = Math.random() * 5 + 3;
+            const startX = Math.random() * window.innerWidth;
+            const duration = Math.random() * 2 + 2; // 2-4 seconds (faster than powder)
+            const drift = Math.random() * 100 - 50;
+
+            snowflake.style.width = size + 'px';
+            snowflake.style.height = size + 'px';
+            snowflake.style.left = startX + 'px';
+            snowflake.style.animationDuration = duration + 's';
+            snowflake.style.opacity = Math.random() * 0.4 + 0.6;
+
+            // Add slight horizontal drift animation
+            snowflake.style.setProperty('--drift', drift + 'px');
+
+            container.appendChild(snowflake);
+
+            // Remove snowflake after animation and add to accumulation
+            setTimeout(() => {
+                snowflake.remove();
+                if (accumulation < targetAccumulation) {
+                    accumulation += 0.01;
+                    accumulationEl.textContent = accumulation.toFixed(1);
+                }
+            }, duration * 1000);
+        }
+
+        // Create snowflakes at intervals (pack snow = moderate rate, heavier flakes)
+        setInterval(createSnowflake, 50);
+
+        // Initial burst of snow
+        for (let i = 0; i < 100; i++) {
+            setTimeout(createSnowflake, Math.random() * 1000);
+        }
+
+        // Temperature-based color hint
+        const tempColors = {
+            freezing: 'rgba(100, 149, 237, 0.1)',
+            cold: 'rgba(70, 130, 180, 0.1)'
+        };
+    </script>
+</body>
+</html>
