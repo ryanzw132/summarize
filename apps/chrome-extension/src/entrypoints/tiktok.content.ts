@@ -769,32 +769,69 @@ function extractTikTokVideoIdFromUrl(): string | null {
 
 /**
  * Find the video element that is most likely the "active" one (visible and playing).
+ * On TikTok FYP, multiple videos may be in DOM and playing - we prioritize by viewport position.
  */
 function findActiveVideoElement(): HTMLVideoElement | null {
   const videos = Array.from(document.querySelectorAll('video'))
+  if (videos.length === 0) return null
 
-  // Prefer videos that are playing
-  const playingVideo = videos.find(v => !v.paused && v.readyState >= 2)
-  if (playingVideo) return playingVideo
-
-  // Find videos in the center of the viewport
   const viewportCenter = window.innerHeight / 2
+  const viewportThreshold = window.innerHeight * 0.3 // Video must be within 30% of center
+
+  // Score each video based on: viewport position + playing state
+  // Lower score = better candidate
   let bestVideo: HTMLVideoElement | null = null
-  let bestDistance = Infinity
+  let bestScore = Infinity
 
   for (const video of videos) {
     const rect = video.getBoundingClientRect()
-    // Check if video is visible in viewport
+
+    // Skip videos completely outside viewport
     if (rect.bottom < 0 || rect.top > window.innerHeight) continue
 
-    const videoCenter = rect.top + rect.height / 2
-    const distance = Math.abs(videoCenter - viewportCenter)
+    // Skip very small videos (likely thumbnails or ads)
+    if (rect.width < 100 || rect.height < 100) continue
 
-    if (distance < bestDistance) {
-      bestDistance = distance
+    const videoCenter = rect.top + rect.height / 2
+    const distanceFromCenter = Math.abs(videoCenter - viewportCenter)
+
+    // Score: lower is better
+    // - Distance from viewport center (weighted heavily)
+    // - Bonus for playing videos (subtract 1000 from score)
+    // - Bonus for videos with good readyState (subtract 500)
+    let score = distanceFromCenter
+
+    if (!video.paused) score -= 1000
+    if (video.readyState >= 2) score -= 500
+
+    // Check if video is in an "active" container (TikTok sometimes marks these)
+    const container = video.closest('[class*="active"], [data-active="true"]')
+    if (container) score -= 500
+
+    if (score < bestScore) {
+      bestScore = score
       bestVideo = video
     }
   }
+
+  // If best video is far from center and not playing, it might be stale
+  if (bestVideo) {
+    const rect = bestVideo.getBoundingClientRect()
+    const videoCenter = rect.top + rect.height / 2
+    const distanceFromCenter = Math.abs(videoCenter - viewportCenter)
+
+    // If video is far from center and not playing, return null to force DOM fallback
+    if (distanceFromCenter > viewportThreshold && bestVideo.paused) {
+      debugLog('Best video is far from center and paused, may be stale')
+      return null
+    }
+  }
+
+  debugLog('Found active video:', bestVideo ? 'yes' : 'no', {
+    paused: bestVideo?.paused,
+    readyState: bestVideo?.readyState,
+    score: bestScore,
+  })
 
   return bestVideo
 }
@@ -809,7 +846,8 @@ function extractActiveVideoIdFromDOM(): string | null {
   // Method 1: Find the most visible/active video element first
   const activeVideo = findActiveVideoElement()
   if (activeVideo) {
-    debugLog('Found active video element')
+    debugLog('Found active video element, searching for ID in ancestors')
+
     // Walk up to find container with video ID
     let parent: Element | null = activeVideo
     while (parent) {
@@ -817,7 +855,7 @@ function extractActiveVideoIdFromDOM(): string | null {
         || parent.getAttribute('data-item-id')
         || parent.getAttribute('data-id')
       if (id) {
-        debugLog('Found video ID from parent:', id)
+        debugLog('Found video ID from parent data attr:', id)
         return id
       }
 
@@ -830,6 +868,37 @@ function extractActiveVideoIdFromDOM(): string | null {
       }
 
       parent = parent.parentElement
+    }
+
+    // Method 1b: Look for video link near the active video
+    // Walk up to find a reasonable container, then look for video links within
+    let container: Element | null = activeVideo.closest('[class*="DivItemContainer"], [class*="DivVideoWrapper"], [data-e2e*="video"], [class*="video-feed-item"]')
+    if (container) {
+      const linkInContainer = container.querySelector('a[href*="/video/"]')
+      if (linkInContainer) {
+        const href = linkInContainer.getAttribute('href') || ''
+        const match = href.match(/\/video\/(\d+)/)
+        if (match) {
+          debugLog('Found video ID from link in container:', match[1])
+          return match[1]
+        }
+      }
+    }
+
+    // Method 1c: Look for share buttons or other elements with video ID near active video
+    container = activeVideo.closest('[class*="DivContentContainer"], [class*="DivVideoContainer"]')
+      || activeVideo.parentElement?.parentElement?.parentElement
+    if (container) {
+      // Look for any link containing /video/ pattern
+      const allLinks = container.querySelectorAll('a[href*="/video/"]')
+      for (const link of allLinks) {
+        const href = link.getAttribute('href') || ''
+        const match = href.match(/\/video\/(\d+)/)
+        if (match) {
+          debugLog('Found video ID from nearby link:', match[1])
+          return match[1]
+        }
+      }
     }
   }
 
@@ -868,21 +937,45 @@ function extractActiveVideoIdFromDOM(): string | null {
         return id
       }
     }
-  }
 
-  // Method 3: Parse from any visible video link on the page
-  const videoLinks = document.querySelectorAll('a[href*="/video/"]')
-  for (const link of videoLinks) {
-    const href = link.getAttribute('href') || ''
-    const match = href.match(/\/video\/(\d+)/)
-    if (match) {
-      // Check if this link is in the viewport center area
-      const rect = link.getBoundingClientRect()
-      const viewportCenter = window.innerHeight / 2
-      if (rect.top < viewportCenter && rect.bottom > viewportCenter) {
-        debugLog('Found video ID from link:', match[1])
+    // Try to find video link in container
+    const linkInContainer = container.querySelector('a[href*="/video/"]')
+    if (linkInContainer) {
+      const href = linkInContainer.getAttribute('href') || ''
+      const match = href.match(/\/video\/(\d+)/)
+      if (match) {
+        debugLog('Found video ID from link in active container:', match[1])
         return match[1]
       }
+    }
+  }
+
+  // Method 3: Find video link closest to viewport center
+  const videoLinks = Array.from(document.querySelectorAll('a[href*="/video/"]'))
+  const viewportCenter = window.innerHeight / 2
+  let bestLink: Element | null = null
+  let bestDistance = Infinity
+
+  for (const link of videoLinks) {
+    const rect = link.getBoundingClientRect()
+    // Skip links outside viewport
+    if (rect.bottom < 0 || rect.top > window.innerHeight) continue
+
+    const linkCenter = rect.top + rect.height / 2
+    const distance = Math.abs(linkCenter - viewportCenter)
+
+    if (distance < bestDistance) {
+      bestDistance = distance
+      bestLink = link
+    }
+  }
+
+  if (bestLink && bestDistance < window.innerHeight * 0.4) {
+    const href = bestLink.getAttribute('href') || ''
+    const match = href.match(/\/video\/(\d+)/)
+    if (match) {
+      debugLog('Found video ID from closest link:', match[1], 'distance:', bestDistance)
+      return match[1]
     }
   }
 
