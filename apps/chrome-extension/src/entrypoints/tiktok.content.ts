@@ -1361,8 +1361,28 @@ async function extractTranscript(): Promise<TikTokTranscriptResponse> {
   if (subtitleInfos.length === 0) {
     debugLog('No captions found after retries')
     // Include video URL for Whisper fallback (important for FYP/Explore pages)
-    const videoId = getActiveVideoId()
-    const videoUrl = videoId ? `https://www.tiktok.com/@user/video/${videoId}` : undefined
+    // Prefer current page URL for video detail pages, otherwise construct from itemStruct
+    let videoUrl: string | undefined
+
+    const isVideoDetailPage = window.location.pathname.includes('/video/')
+    if (isVideoDetailPage) {
+      // On video detail page, use current URL (most reliable)
+      videoUrl = window.location.href.split('?')[0] // Remove query params
+    } else {
+      // On FYP/Explore, try to construct URL from itemStruct data
+      const videoId = getActiveVideoId()
+      if (videoId) {
+        const itemStruct = extractTikTokItemStruct()
+        const username = itemStruct?.author?.uniqueId
+        if (username) {
+          videoUrl = `https://www.tiktok.com/@${username}/video/${videoId}`
+        } else {
+          // Fallback: TikTok accepts @user placeholder and redirects to canonical URL
+          videoUrl = `https://www.tiktok.com/@user/video/${videoId}`
+        }
+      }
+    }
+
     debugLog('No captions, returning video URL for Whisper:', videoUrl)
     return {
       ok: false,
