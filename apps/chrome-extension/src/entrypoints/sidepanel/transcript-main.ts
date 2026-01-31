@@ -1335,6 +1335,7 @@ type ContentScriptExtractionResult =
   | { text: string; source: string }
   | { videoUrl: string; source: string }
   | { isAd: true; reason: string }
+  | { skipSilent: true; reason: string }  // Silent skip - don't count or log (non-English)
   | null
 
 async function tryContentScriptExtraction(
@@ -1366,8 +1367,8 @@ async function tryContentScriptExtraction(
         return { isAd: true, reason: 'Music video - skipped' }
       }
       if (response.reason === 'not_english') {
-        console.log('[Transcript] YouTube video is not English, skipping:', response.error)
-        return { isAd: true, reason: 'Non-English video - skipped' }
+        // Silent skip - don't log or count non-English videos
+        return { skipSilent: true, reason: 'Non-English video' }
       }
       console.log('[Transcript] YouTube content script:', response.reason, '-', response.error)
       createDiagnostic('ERR_NO_CAPTIONS', `YouTube: ${response.reason}`, response.error)
@@ -1399,8 +1400,8 @@ async function tryContentScriptExtraction(
         return { isAd: true, reason: 'Music video - skipped' }
       }
       if (response.reason === 'not_english') {
-        console.log('[Transcript] TikTok video is not English, skipping:', response.error)
-        return { isAd: true, reason: 'Non-English video - skipped' }
+        // Silent skip - don't log or count non-English videos
+        return { skipSilent: true, reason: 'Non-English video' }
       }
       console.log('[Transcript] TikTok content script:', response.reason, '-', response.error)
       createDiagnostic('ERR_NO_CAPTIONS', `TikTok: ${response.reason}`, response.error)
@@ -2038,14 +2039,23 @@ async function startAutoScroll() {
   // Auto-scroll loop
   while (isAutoScrolling) {
     try {
+      // Get transcript for current video first to check if we should count it
+      const transcriptResult = await getTranscriptForCurrentVideo(tabId, platform, videoCount + 1)
+
+      // Check for silent skip (e.g., non-English) - don't count or log, just move on
+      if (transcriptResult && 'skip' in transcriptResult && transcriptResult.skip === 'silent') {
+        // Silently scroll to next without counting or updating UI
+        await scrollToNext(tabId, platform)
+        await new Promise(resolve => setTimeout(resolve, scrollDelay))
+        continue
+      }
+
+      // Now we know we're processing this video, so increment count
       videoCount++
       autoScrollStatusEl.textContent = `Processing video ${videoCount}...`
       console.log(`[AutoScroll] Processing video ${videoCount}`)
 
-      // Get transcript for current video (pass videoCount for error reporting)
-      const transcriptResult = await getTranscriptForCurrentVideo(tabId, platform, videoCount)
-
-      // Check for skip reasons (ad or no audio)
+      // Check for other skip reasons (ad or no audio)
       if (transcriptResult && 'skip' in transcriptResult) {
         if (transcriptResult.skip === 'ad') {
           console.log(`[AutoScroll] Skipping ad video ${videoCount}: ${transcriptResult.reason}`)
@@ -2266,6 +2276,7 @@ type TranscriptResult =
   | { text: string; source: string }
   | { skip: 'ad'; reason: string }
   | { skip: 'no_audio'; reason: string }
+  | { skip: 'silent'; reason: string }  // Silent skip - don't count or log (e.g., non-English)
   | null
 
 /**
@@ -2290,6 +2301,11 @@ async function getTranscriptForCurrentVideo(
   if (contentResult && 'isAd' in contentResult) {
     console.log('[AutoScroll] Skipping ad:', contentResult.reason)
     return { skip: 'ad', reason: contentResult.reason }
+  }
+
+  // Check if this should be silently skipped (e.g., non-English)
+  if (contentResult && 'skipSilent' in contentResult) {
+    return { skip: 'silent', reason: contentResult.reason }
   }
 
   // Check if we got valid text (not empty/whitespace)
