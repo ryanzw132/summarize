@@ -852,14 +852,22 @@ function extractStatsFromDOM(): { views: number | null; likes: number | null; co
       }
     }
 
-    // Likes - look for like button
-    const likeButton = document.querySelector('ytd-toggle-button-renderer#top-level-buttons-computed [aria-label*="like"], like-button-view-model button, #segmented-like-button button')
-    if (likeButton) {
-      const ariaLabel = likeButton.getAttribute('aria-label') || ''
-      const text = likeButton.textContent || ''
+    // Likes - look for like button (but NOT dislike)
+    // Use more specific selectors and verify aria-label doesn't contain "dislike"
+    const likeButtonCandidates = document.querySelectorAll('like-button-view-model button, #segmented-like-button button, ytd-toggle-button-renderer#top-level-buttons-computed button[aria-label]')
+    for (const button of likeButtonCandidates) {
+      const ariaLabel = (button.getAttribute('aria-label') || '').toLowerCase()
+      // Skip if it's the dislike button
+      if (ariaLabel.includes('dislike')) continue
+      // Only process if it contains "like"
+      if (!ariaLabel.includes('like')) continue
+
+      const text = button.textContent || ''
       const likeMatch = ariaLabel.match(/(\d[\d,]*[KMB]?)/i) || text.match(/([\d,]+[KMB]?)/i)
       if (likeMatch) {
         stats.likes = parseYouTubeNumber(likeMatch[1])
+        debugLog('Found likes from like button:', stats.likes)
+        break
       }
     }
 

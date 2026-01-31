@@ -309,6 +309,67 @@ function parseInstagramNumber(text: string | null): number | null {
 }
 
 /**
+ * Find the active video/reel container.
+ * Looks for the dialog (modal view) or the article containing the playing video.
+ * Used by multiple functions to ensure they operate on the correct reel.
+ */
+function findActiveVideoContainer(): Element {
+  // Method 1: Check for dialog (modal view)
+  const dialog = document.querySelector('[role="dialog"]')
+  if (dialog && dialog.querySelector('video')) {
+    debugLog('Using dialog container for active video')
+    return dialog
+  }
+
+  // Method 2: Find the article containing the playing video
+  const videos = document.querySelectorAll('video')
+  for (const video of videos) {
+    // Check if video is playing or is in viewport
+    if (!video.paused || video.currentTime > 0) {
+      const container = video.closest('article') || video.closest('[role="presentation"]')
+      if (container) {
+        debugLog('Using article with playing video')
+        return container
+      }
+    }
+  }
+
+  // Method 3: Find the video closest to viewport center (most likely the active one)
+  let bestVideo: HTMLVideoElement | null = null
+  let bestDistance = Infinity
+  const viewportCenter = window.innerHeight / 2
+  for (const video of videos) {
+    const rect = video.getBoundingClientRect()
+    const videoCenter = rect.top + rect.height / 2
+    const distance = Math.abs(videoCenter - viewportCenter)
+    if (distance < bestDistance) {
+      bestDistance = distance
+      bestVideo = video
+    }
+  }
+  if (bestVideo) {
+    const container = bestVideo.closest('article') || bestVideo.closest('[role="presentation"]')
+    if (container) {
+      debugLog('Using article with viewport-centered video')
+      return container
+    }
+  }
+
+  // Method 4: Fall back to first article with video
+  const articles = document.querySelectorAll('article')
+  for (const article of articles) {
+    if (article.querySelector('video')) {
+      debugLog('Using first article with video (fallback)')
+      return article
+    }
+  }
+
+  // Method 5: Use document if no container found
+  debugLog('Using document (no specific container found)')
+  return document.documentElement
+}
+
+/**
  * Extract stats from DOM elements
  * Instagram Reels show stats in action buttons on the right side of the video
  */
@@ -316,48 +377,7 @@ function extractStatsFromDOM(): { views: number | null; likes: number | null; co
   const stats = { views: null as number | null, likes: null as number | null, comments: null as number | null, shares: null as number | null }
 
   // Find the current active video/reel container
-  // Instagram Reels are shown in articles, and we want the one that's currently visible/playing
-  let container: Element | null = null
-
-  // Method 1: Check for dialog (modal view)
-  const dialog = document.querySelector('[role="dialog"]')
-  if (dialog && dialog.querySelector('video')) {
-    container = dialog
-    debugLog('Using dialog container for stats')
-  }
-
-  // Method 2: Find the article containing the playing video
-  if (!container) {
-    const videos = document.querySelectorAll('video')
-    for (const video of videos) {
-      // Check if video is playing or is in viewport
-      if (!video.paused || video.currentTime > 0) {
-        container = video.closest('article') || video.closest('[role="presentation"]')
-        if (container) {
-          debugLog('Using article with playing video for stats')
-          break
-        }
-      }
-    }
-  }
-
-  // Method 3: Fall back to first article with video
-  if (!container) {
-    const articles = document.querySelectorAll('article')
-    for (const article of articles) {
-      if (article.querySelector('video')) {
-        container = article
-        debugLog('Using first article with video for stats')
-        break
-      }
-    }
-  }
-
-  // Method 4: Use document if no container found
-  if (!container) {
-    container = document
-    debugLog('Using document for stats (no specific container found)')
-  }
+  const container = findActiveVideoContainer()
 
   // Now extract stats from the container
   const article = container
@@ -663,64 +683,35 @@ function extractReelCaptionFromDOM(): { caption: string | null; creator: string 
   let caption: string | null = null
   let creator: string | null = null
 
-  // Find the current article (reel container)
-  const article = document.querySelector('article')
+  // Find the active video container (handles dialog vs feed scrolling)
+  const container = findActiveVideoContainer()
 
-  if (article) {
-    // Look for the caption text - usually in a span inside the article
-    // The caption is typically after the username and has longer text
-    const allSpans = article.querySelectorAll('span')
-    for (const span of allSpans) {
-      const text = span.textContent?.trim() || ''
-      // Skip short text (buttons, labels)
-      if (text.length < 20) continue
-      // Skip text that looks like metadata
-      if (text.match(/^[\d,]+\s*(likes?|views?|comments?)/i)) continue
-      // Skip "Sponsored" labels
-      if (text.toLowerCase() === 'sponsored') continue
-      // This might be the caption
-      if (text.length > (caption?.length ?? 0)) {
-        caption = text
-      }
-    }
-
-    // Find creator username - look for links that look like usernames
-    const usernameLinks = article.querySelectorAll('a[href^="/"]')
-    for (const link of usernameLinks) {
-      const href = link.getAttribute('href') || ''
-      // Username links look like /username/ or /username
-      const match = href.match(/^\/([a-zA-Z0-9._]+)\/?$/)
-      if (match && match[1].length > 1 && !['explore', 'reels', 'reel', 'p', 'tv', 'stories'].includes(match[1])) {
-        creator = `@${match[1]}`
-        break
-      }
+  // Look for the caption text - usually in a span inside the container
+  // The caption is typically after the username and has longer text
+  const allSpans = container.querySelectorAll('span')
+  for (const span of allSpans) {
+    const text = span.textContent?.trim() || ''
+    // Skip short text (buttons, labels)
+    if (text.length < 20) continue
+    // Skip text that looks like metadata
+    if (text.match(/^[\d,]+\s*(likes?|views?|comments?)/i)) continue
+    // Skip "Sponsored" labels
+    if (text.toLowerCase() === 'sponsored') continue
+    // This might be the caption
+    if (text.length > (caption?.length ?? 0)) {
+      caption = text
     }
   }
 
-  // Also check for modal dialogs (when viewing a reel in popup)
-  const dialog = document.querySelector('[role="dialog"]')
-  if (dialog && (!caption || !creator)) {
-    const usernameLinks = dialog.querySelectorAll('a[href^="/"]')
-    for (const link of usernameLinks) {
-      const href = link.getAttribute('href') || ''
-      const match = href.match(/^\/([a-zA-Z0-9._]+)\/?$/)
-      if (match && match[1].length > 1 && !['explore', 'reels', 'reel', 'p', 'tv', 'stories'].includes(match[1])) {
-        if (!creator) creator = `@${match[1]}`
-        break
-      }
-    }
-
-    if (!caption) {
-      const allSpans = dialog.querySelectorAll('span')
-      for (const span of allSpans) {
-        const text = span.textContent?.trim() || ''
-        if (text.length < 20) continue
-        if (text.match(/^[\d,]+\s*(likes?|views?|comments?)/i)) continue
-        if (text.toLowerCase() === 'sponsored') continue
-        if (text.length > (caption?.length ?? 0)) {
-          caption = text
-        }
-      }
+  // Find creator username - look for links that look like usernames
+  const usernameLinks = container.querySelectorAll('a[href^="/"]')
+  for (const link of usernameLinks) {
+    const href = link.getAttribute('href') || ''
+    // Username links look like /username/ or /username
+    const match = href.match(/^\/([a-zA-Z0-9._]+)\/?$/)
+    if (match && match[1].length > 1 && !['explore', 'reels', 'reel', 'p', 'tv', 'stories'].includes(match[1])) {
+      creator = `@${match[1]}`
+      break
     }
   }
 
@@ -1068,8 +1059,8 @@ function isCurrentVideoAd(): InstagramAdCheckResponse {
     '赞助', '广告', // Chinese
   ]
 
-  // The current article/post container
-  const article = document.querySelector('article') || document
+  // Find the active video container (handles dialog vs feed scrolling)
+  const article = findActiveVideoContainer()
 
   // Method 1: Check for exact "Sponsored" text label (localized)
   // Instagram shows "Sponsored" as a standalone label below the username for ads

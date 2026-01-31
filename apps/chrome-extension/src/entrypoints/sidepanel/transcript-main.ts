@@ -25,7 +25,12 @@ type TikTokTranscriptResponse =
       source: 'tiktok-captions'
       durationSeconds: number | null
     }
-  | { ok: false; error: string; reason: 'no_captions' | 'fetch_failed' | 'parse_failed' | 'extraction_error' | 'is_ad' | 'is_music' | 'not_english' }
+  | {
+      ok: false
+      error: string
+      reason: 'no_captions' | 'fetch_failed' | 'parse_failed' | 'extraction_error' | 'is_ad' | 'is_music' | 'not_english'
+      videoUrl?: string  // For Whisper fallback on FYP/Explore pages
+    }
 
 type InstagramTranscriptResponse =
   | {
@@ -1405,6 +1410,11 @@ async function tryContentScriptExtraction(
         // Silent skip - don't log or count non-English videos
         return { skipSilent: true, reason: 'Non-English video' }
       }
+      // If no captions but we have a video URL, return it for Whisper fallback
+      if (response.reason === 'no_captions' && response.videoUrl) {
+        console.log('[Transcript] TikTok no captions, using video URL for Whisper:', response.videoUrl)
+        return { videoUrl: response.videoUrl, source: 'tiktok-video' }
+      }
       console.log('[Transcript] TikTok content script:', response.reason, '-', response.error)
       createDiagnostic('ERR_NO_CAPTIONS', `TikTok: ${response.reason}`, response.error)
     }
@@ -1635,6 +1645,20 @@ async function fetchTranscript() {
         return
       }
 
+      // Check for skip reasons that should stop manual fetch too
+      if (contentResult && 'isAd' in contentResult) {
+        clearTimeout(safetyTimeoutId)
+        setProgress(0)
+        showError('This video is an advertisement. Skipping.')
+        return
+      }
+      if (contentResult && 'skipSilent' in contentResult) {
+        clearTimeout(safetyTimeoutId)
+        setProgress(0)
+        showError('This video is not in English. Only English content is transcribed.')
+        return
+      }
+
       if (contentResult && 'text' in contentResult) {
         // Got transcript text directly (TikTok captions)
         clearTimeout(safetyTimeoutId)
@@ -1644,9 +1668,9 @@ async function fetchTranscript() {
         return
       }
       if (contentResult && 'videoUrl' in contentResult) {
-        // Got video URL (Instagram) - will send to daemon for transcription
+        // Got video URL (Instagram/TikTok) - will send to daemon for transcription
         extractedVideoUrl = contentResult.videoUrl
-        needsWhisperFallback = true  // Instagram always needs Whisper (no native captions)
+        needsWhisperFallback = true
         setStatus('Video found, transcribing...')
         setProgress(30)
       } else {
@@ -1667,6 +1691,20 @@ async function fetchTranscript() {
 
       if (isStale()) {
         clearTimeout(safetyTimeoutId)
+        return
+      }
+
+      // Check for skip reasons that should stop manual fetch too
+      if (contentResult && 'isAd' in contentResult) {
+        clearTimeout(safetyTimeoutId)
+        setProgress(0)
+        showError('This video is an advertisement. Skipping.')
+        return
+      }
+      if (contentResult && 'skipSilent' in contentResult) {
+        clearTimeout(safetyTimeoutId)
+        setProgress(0)
+        showError('This video is not in English. Only English content is transcribed.')
         return
       }
 
@@ -2094,12 +2132,13 @@ async function startAutoScroll() {
         if (consecutiveSilentSkips >= maxConsecutiveSilentSkips) {
           console.log(`[AutoScroll] Too many consecutive silent skips (${consecutiveSilentSkips}), stopping`)
           autoScrollStatusEl.textContent = 'Stopped: too many non-English videos in a row'
+          stopAutoScroll()
           break
         }
 
         // Silently scroll to next without counting or updating UI
         await scrollToNextVideo(tabId, platform)
-        await new Promise(resolve => setTimeout(resolve, scrollDelay))
+        await new Promise(resolve => setTimeout(resolve, 2500))  // Same as normal scroll delay
         continue
       }
 

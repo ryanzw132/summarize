@@ -51,7 +51,12 @@ type TikTokTranscriptResponse =
       source: 'tiktok-captions'
       durationSeconds: number | null
     }
-  | { ok: false; error: string; reason: 'no_captions' | 'fetch_failed' | 'parse_failed' | 'extraction_error' | 'is_ad' | 'is_music' | 'not_english' }
+  | {
+      ok: false
+      error: string
+      reason: 'no_captions' | 'fetch_failed' | 'parse_failed' | 'extraction_error' | 'is_ad' | 'is_music' | 'not_english'
+      videoUrl?: string  // For Whisper fallback - the active video URL
+    }
 
 type TikTokMetadataRequest = { type: 'tiktok-metadata' }
 type TikTokScrollNextRequest = { type: 'tiktok-scroll-next' }
@@ -636,20 +641,30 @@ function extractItemStructFromSigiState(data: unknown): TikTokItemStruct | null 
     if (videoId && itemId === videoId) {
       return item as TikTokItemStruct
     }
-
-    // If we have no video ID, return the first valid item
-    if (!videoId && item.video) {
-      return item as TikTokItemStruct
-    }
   }
 
-  // Last resort: return first item with video data
-  const first = Object.values(itemModule).find((value) => {
-    if (!value || typeof value !== 'object') return false
-    const item = value as Record<string, unknown>
-    return item.video || item.desc !== undefined
-  }) as TikTokItemStruct | undefined
-  return first ?? null
+  // If we have a video ID but didn't find a match, return null
+  // This is better than returning the wrong video's data
+  if (videoId) {
+    debugLog('Video ID found but no matching item in ItemModule:', videoId)
+    return null
+  }
+
+  // On video detail page (has /video/ in URL), we can safely use first item
+  const isVideoDetailPage = window.location.pathname.includes('/video/')
+  if (isVideoDetailPage) {
+    const first = Object.values(itemModule).find((value) => {
+      if (!value || typeof value !== 'object') return false
+      const item = value as Record<string, unknown>
+      return item.video || item.desc !== undefined
+    }) as TikTokItemStruct | undefined
+    return first ?? null
+  }
+
+  // On FYP/Explore, without a video ID we can't reliably identify the active video
+  // Return null and let DOM fallback handle it
+  debugLog('No video ID on FYP/Explore page, cannot identify active video')
+  return null
 }
 
 /**
@@ -983,25 +998,6 @@ function isEnglishSubtitle(languageCode: string): boolean {
     || lower.includes('english')
 }
 
-function selectBestSubtitleInfo(subtitleInfos: TikTokSubtitleInfo[]): TikTokSubtitleInfo | null {
-  if (!Array.isArray(subtitleInfos) || subtitleInfos.length === 0) return null
-
-  const nowSeconds = Math.floor(Date.now() / 1000)
-  const nonExpired = subtitleInfos.filter((info) => {
-    if (!info.urlExpire || info.urlExpire <= 0) return true
-    return info.urlExpire > nowSeconds + 5
-  })
-  const candidates = nonExpired.length > 0 ? nonExpired : subtitleInfos
-
-  // ONLY return English subtitles - skip non-English content entirely
-  const englishInfo = candidates.find((info) => isEnglishSubtitle(info.languageCode))
-  if (!englishInfo) {
-    debugLog('No English subtitles available, skipping non-English content')
-    return null
-  }
-  return englishInfo
-}
-
 /**
  * Parse JSON transcript format into segments
  */
@@ -1060,34 +1056,49 @@ function parseJsonTranscript(json: string): { text: string; segments: Transcript
 }
 
 /**
- * Fetch and parse TikTok captions from the subtitle URL.
- * Supports WebVTT and JSON formats with retry logic.
+ * Get all English subtitle infos sorted by priority (non-expired first).
+ */
+function getEnglishSubtitleInfos(subtitleInfos: TikTokSubtitleInfo[]): TikTokSubtitleInfo[] {
+  if (!Array.isArray(subtitleInfos) || subtitleInfos.length === 0) return []
+
+  const nowSeconds = Math.floor(Date.now() / 1000)
+  const englishInfos = subtitleInfos.filter((info) => isEnglishSubtitle(info.languageCode))
+
+  // Sort by expiry (non-expired first, then by expiry time descending)
+  return englishInfos.sort((a, b) => {
+    const aExpired = a.urlExpire > 0 && a.urlExpire <= nowSeconds + 5
+    const bExpired = b.urlExpire > 0 && b.urlExpire <= nowSeconds + 5
+    if (aExpired !== bExpired) return aExpired ? 1 : -1
+    // Both same expiry status, sort by expiry time (later expiry = better)
+    return (b.urlExpire || 0) - (a.urlExpire || 0)
+  })
+}
+
+/**
+ * Fetch and parse TikTok captions from subtitle URLs.
+ * Supports WebVTT and JSON formats. Tries multiple subtitle URLs on 403/410.
  */
 async function fetchTikTokCaptions(
   subtitleInfos: TikTokSubtitleInfo[]
 ): Promise<{ text: string; segments: TranscriptSegment[] } | null> {
-  const selectedInfo = selectBestSubtitleInfo(subtitleInfos)
+  const englishInfos = getEnglishSubtitleInfos(subtitleInfos)
 
-  if (!selectedInfo?.url) {
+  if (englishInfos.length === 0) {
+    debugLog('No English subtitles available')
     return null
   }
 
-  // Retry logic with cache-busting for stale URLs
-  const maxRetries = 2
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
+  // Try each English subtitle URL (handles case where one URL is expired/403)
+  for (const subtitleInfo of englishInfos) {
+    if (!subtitleInfo.url) continue
+
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), 10000)
 
     try {
-      // Add cache-busting on retry
-      let url = selectedInfo.url
-      if (attempt > 0 && !url.includes('_retry=')) {
-        url += (url.includes('?') ? '&' : '?') + '_retry=' + Date.now()
-      }
-
-      const response = await fetch(url, {
+      const response = await fetch(subtitleInfo.url, {
         headers: {
-          Accept: selectedInfo.format === 'json'
+          Accept: subtitleInfo.format === 'json'
             ? 'application/json, text/plain, */*'
             : 'text/vtt, text/plain, */*',
         },
@@ -1097,17 +1108,18 @@ async function fetchTikTokCaptions(
       })
 
       if (!response.ok) {
-        // If URL might be expired, try next attempt
+        // If URL expired (403/410), try next subtitle URL instead of retrying same URL
         if (response.status === 403 || response.status === 410) {
+          debugLog(`Subtitle URL returned ${response.status}, trying next URL`)
           continue
         }
-        return null
+        continue
       }
 
       const content = await response.text()
 
       // Parse based on format or auto-detect
-      if (selectedInfo.format === 'json' || content.trim().startsWith('{') || content.trim().startsWith('[')) {
+      if (subtitleInfo.format === 'json' || content.trim().startsWith('{') || content.trim().startsWith('[')) {
         const jsonResult = parseJsonTranscript(content)
         if (jsonResult) return jsonResult
       }
@@ -1117,13 +1129,14 @@ async function fetchTikTokCaptions(
       if (vttResult) return vttResult
 
       // If neither worked, try the other format
-      if (selectedInfo.format !== 'json') {
+      if (subtitleInfo.format !== 'json') {
         const jsonResult = parseJsonTranscript(content)
         if (jsonResult) return jsonResult
       }
 
     } catch {
-      // Continue to next retry
+      // Continue to next subtitle URL
+      debugLog('Fetch error, trying next URL')
     } finally {
       clearTimeout(timeoutId)
     }
@@ -1347,10 +1360,15 @@ async function extractTranscript(): Promise<TikTokTranscriptResponse> {
 
   if (subtitleInfos.length === 0) {
     debugLog('No captions found after retries')
+    // Include video URL for Whisper fallback (important for FYP/Explore pages)
+    const videoId = getActiveVideoId()
+    const videoUrl = videoId ? `https://www.tiktok.com/@user/video/${videoId}` : undefined
+    debugLog('No captions, returning video URL for Whisper:', videoUrl)
     return {
       ok: false,
       error: 'No captions available for this TikTok video',
       reason: 'no_captions',
+      videoUrl,
     }
   }
 
