@@ -2033,6 +2033,8 @@ async function startAutoScroll() {
   // Track video count for logging
   let videoCount = 0
   let failedCount = 0
+  let consecutiveSilentSkips = 0
+  const maxConsecutiveSilentSkips = 20  // Prevent infinite loop if all videos are non-English
 
   console.log(`[AutoScroll] Starting auto-scroll on ${platform}`)
 
@@ -2044,11 +2046,23 @@ async function startAutoScroll() {
 
       // Check for silent skip (e.g., non-English) - don't count or log, just move on
       if (transcriptResult && 'skip' in transcriptResult && transcriptResult.skip === 'silent') {
+        consecutiveSilentSkips++
+
+        // Guard against infinite loop
+        if (consecutiveSilentSkips >= maxConsecutiveSilentSkips) {
+          console.log(`[AutoScroll] Too many consecutive silent skips (${consecutiveSilentSkips}), stopping`)
+          autoScrollStatusEl.textContent = 'Stopped: too many non-English videos in a row'
+          break
+        }
+
         // Silently scroll to next without counting or updating UI
         await scrollToNext(tabId, platform)
         await new Promise(resolve => setTimeout(resolve, scrollDelay))
         continue
       }
+
+      // Reset silent skip counter on successful processing
+      consecutiveSilentSkips = 0
 
       // Now we know we're processing this video, so increment count
       videoCount++
@@ -2298,13 +2312,15 @@ async function getTranscriptForCurrentVideo(
   const contentResult = await tryContentScriptExtraction(tabId, platform)
 
   // Check if this is an ad - skip immediately
-  if (contentResult && 'isAd' in contentResult) {
+  // Use explicit === true check to avoid false positives if isAd property exists but is false
+  if (contentResult && 'isAd' in contentResult && contentResult.isAd === true) {
     console.log('[AutoScroll] Skipping ad:', contentResult.reason)
     return { skip: 'ad', reason: contentResult.reason }
   }
 
   // Check if this should be silently skipped (e.g., non-English)
-  if (contentResult && 'skipSilent' in contentResult) {
+  // Use explicit === true check for safety
+  if (contentResult && 'skipSilent' in contentResult && contentResult.skipSilent === true) {
     return { skip: 'silent', reason: contentResult.reason }
   }
 

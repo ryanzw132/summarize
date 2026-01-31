@@ -652,27 +652,48 @@ function extractVideoDuration(): number | null {
  * Music videos typically have song lyrics as captions and we want to skip them.
  */
 function isMusicVideo(): boolean {
-  // Check video category from player response
+  // Check video category from player response - this is the most reliable indicator
   const category = readFromPageContext('window.ytInitialPlayerResponse?.microformat?.playerMicroformatRenderer?.category')
   if (category === 'Music') {
     debugLog('Detected music video from category')
     return true
   }
 
-  // Check for music-related keywords in title
+  // Check for music-related keywords in title using word boundaries to avoid false positives
   const title = readFromPageContext('window.ytInitialPlayerResponse?.videoDetails?.title') as string | undefined
   if (title) {
     const lowerTitle = title.toLowerCase()
-    // Common music video indicators
-    const musicIndicators = [
-      'official music video', 'official video', 'official audio',
-      'lyrics', 'lyric video', '(audio)', '[audio]',
-      'music video', 'mv', 'official mv',
-      'feat.', 'ft.', 'remix', 'cover song',
+
+    // Exact phrase matches (high confidence)
+    const exactPhrases = [
+      'official music video',
+      'official audio',
+      'lyric video',
+      'lyrics video',
+      'music video',
+      'audio only',
     ]
-    for (const indicator of musicIndicators) {
-      if (lowerTitle.includes(indicator)) {
-        debugLog('Detected music video from title:', indicator)
+    for (const phrase of exactPhrases) {
+      if (lowerTitle.includes(phrase)) {
+        debugLog('Detected music video from exact phrase:', phrase)
+        return true
+      }
+    }
+
+    // Word boundary patterns (use regex to avoid partial matches)
+    // e.g., "mv" should not match "movie" or "moving"
+    const wordBoundaryPatterns = [
+      /\bmv\b/,           // "MV" as standalone word
+      /\(audio\)/,        // "(audio)" in parentheses
+      /\[audio\]/,        // "[audio]" in brackets
+      /\blyrics\b/,       // "lyrics" as standalone word
+      /\bremix\b/,        // "remix" as standalone word
+      /\bfeat\./,         // "feat." followed by artist
+      /\bft\./,           // "ft." followed by artist
+    ]
+    for (const pattern of wordBoundaryPatterns) {
+      if (pattern.test(lowerTitle)) {
+        debugLog('Detected music video from pattern:', pattern.toString())
         return true
       }
     }
@@ -682,8 +703,13 @@ function isMusicVideo(): boolean {
   const channelName = readFromPageContext('window.ytInitialPlayerResponse?.videoDetails?.author') as string | undefined
   if (channelName) {
     const lowerChannel = channelName.toLowerCase()
-    // Common music label/artist channel patterns
-    if (lowerChannel.includes('vevo') || lowerChannel.includes('records') || lowerChannel.includes(' music')) {
+    // VEVO is definitely a music channel
+    if (lowerChannel.includes('vevo')) {
+      debugLog('Detected music video from VEVO channel:', channelName)
+      return true
+    }
+    // Only match "records" and "music" at word boundaries to avoid false positives
+    if (/\brecords\b/.test(lowerChannel) || /\bmusic\b/.test(lowerChannel)) {
       debugLog('Detected music video from channel:', channelName)
       return true
     }
@@ -912,40 +938,54 @@ function extractStatsFromDOM(): { views: number | null; likes: number | null; co
 function isCurrentVideoAd(): YouTubeAdCheckResponse {
   debugLog('Checking if current video is an ad')
 
-  // Helper to check if element is visible
+  // Helper to check if element is visible and has size
   const isVisible = (el: Element | null): boolean => {
     if (!el) return false
     const style = window.getComputedStyle(el)
-    return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'
-  }
-
-  // Method 1: Check for YouTube's standard ad overlay elements
-  // These are specific YouTube ad classes that only appear during actual ads
-  // Also verify they're actually visible (not just present in DOM)
-  const adSelectors = [
-    '.ytp-ad-overlay-container',
-    '.ytp-ad-player-overlay',
-    '.video-ads.ytp-ad-module',
-    'ytd-ad-slot-renderer',
-  ]
-
-  for (const selector of adSelectors) {
-    const element = document.querySelector(selector)
-    if (element && isVisible(element)) {
-      debugLog('Found visible ad overlay element:', selector)
-      return { isAd: true, reason: 'Ad overlay detected' }
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+      return false
     }
+    // Also check that element has actual size (not zero-size)
+    const rect = el.getBoundingClientRect()
+    if (rect.width === 0 || rect.height === 0) {
+      return false
+    }
+    // Check if any ancestor is hidden
+    let parent = el.parentElement
+    while (parent) {
+      const parentStyle = window.getComputedStyle(parent)
+      if (parentStyle.display === 'none' || parentStyle.visibility === 'hidden') {
+        return false
+      }
+      parent = parent.parentElement
+    }
+    return true
   }
 
-  // Method 2: Check if the video player is in ad-showing state
+  // Method 1: Check if the video player is in ad-showing state
   // This is the most reliable indicator - YouTube adds this class only during actual ads
   const player = document.querySelector('#movie_player')
   if (player) {
     const classList = player.className || ''
-    // These exact classes are added by YouTube's ad system
     if (classList.includes('ad-showing') || classList.includes('ad-interrupting')) {
       debugLog('Player in ad state')
       return { isAd: true, reason: 'Player showing ad' }
+    }
+
+    // Method 2: Check for ad overlay elements WITHIN the player
+    // Scope to player area to avoid matching sidebar/companion ads
+    const adSelectors = [
+      '.ytp-ad-overlay-container',
+      '.ytp-ad-player-overlay',
+      '.video-ads.ytp-ad-module',
+    ]
+
+    for (const selector of adSelectors) {
+      const element = player.querySelector(selector)
+      if (element && isVisible(element)) {
+        debugLog('Found visible ad overlay in player:', selector)
+        return { isAd: true, reason: 'Ad overlay detected' }
+      }
     }
   }
 
