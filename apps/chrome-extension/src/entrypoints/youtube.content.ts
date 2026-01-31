@@ -647,76 +647,7 @@ function extractVideoDuration(): number | null {
   return null
 }
 
-/**
- * Detect if the current video is a music video.
- * Music videos typically have song lyrics as captions and we want to skip them.
- */
-function isMusicVideo(): boolean {
-  // Check video category from player response - this is the most reliable indicator
-  const category = readFromPageContext('window.ytInitialPlayerResponse?.microformat?.playerMicroformatRenderer?.category')
-  if (category === 'Music') {
-    debugLog('Detected music video from category')
-    return true
-  }
-
-  // Check for music-related keywords in title using word boundaries to avoid false positives
-  const title = readFromPageContext('window.ytInitialPlayerResponse?.videoDetails?.title') as string | undefined
-  if (title) {
-    const lowerTitle = title.toLowerCase()
-
-    // Exact phrase matches (high confidence)
-    const exactPhrases = [
-      'official music video',
-      'official audio',
-      'lyric video',
-      'lyrics video',
-      'music video',
-      'audio only',
-    ]
-    for (const phrase of exactPhrases) {
-      if (lowerTitle.includes(phrase)) {
-        debugLog('Detected music video from exact phrase:', phrase)
-        return true
-      }
-    }
-
-    // Word boundary patterns (use regex to avoid partial matches)
-    // e.g., "mv" should not match "movie" or "moving"
-    const wordBoundaryPatterns = [
-      /\bmv\b/,           // "MV" as standalone word
-      /\(audio\)/,        // "(audio)" in parentheses
-      /\[audio\]/,        // "[audio]" in brackets
-      /\blyrics\b/,       // "lyrics" as standalone word
-      /\bremix\b/,        // "remix" as standalone word
-      /\bfeat\./,         // "feat." followed by artist
-      /\bft\./,           // "ft." followed by artist
-    ]
-    for (const pattern of wordBoundaryPatterns) {
-      if (pattern.test(lowerTitle)) {
-        debugLog('Detected music video from pattern:', pattern.toString())
-        return true
-      }
-    }
-  }
-
-  // Check for music channel/artist indicators
-  const channelName = readFromPageContext('window.ytInitialPlayerResponse?.videoDetails?.author') as string | undefined
-  if (channelName) {
-    const lowerChannel = channelName.toLowerCase()
-    // VEVO is definitely a music channel
-    if (lowerChannel.includes('vevo')) {
-      debugLog('Detected music video from VEVO channel:', channelName)
-      return true
-    }
-    // Only match "records" and "music" at word boundaries to avoid false positives
-    if (/\brecords\b/.test(lowerChannel) || /\bmusic\b/.test(lowerChannel)) {
-      debugLog('Detected music video from channel:', channelName)
-      return true
-    }
-  }
-
-  return false
-}
+// Music detection removed - user will manually review music content
 
 /**
  * Extract transcript from YouTube video captions.
@@ -725,17 +656,36 @@ async function extractYouTubeTranscript(): Promise<YouTubeTranscriptResponse> {
   debugLog('Starting YouTube transcript extraction')
   debugLog('URL:', window.location.href)
 
-  // Check if this is a music video - skip if so
-  if (isMusicVideo()) {
-    return {
-      ok: false,
-      error: 'Music video detected - skipping',
-      reason: 'is_music',
+  // Wait for video element to be ready (important for first video after page load)
+  const waitForVideo = async (maxWait = 2000): Promise<HTMLVideoElement | null> => {
+    const startTime = Date.now()
+    while (Date.now() - startTime < maxWait) {
+      const video = document.querySelector('video') as HTMLVideoElement | null
+      // Video should exist and have some data loaded
+      if (video && (video.readyState >= 1 || video.duration > 0)) {
+        debugLog('Video element ready:', { readyState: video.readyState, duration: video.duration })
+        return video
+      }
+      await new Promise(resolve => setTimeout(resolve, 100))
     }
+    return document.querySelector('video') as HTMLVideoElement | null
   }
 
-  const tracks = extractCaptionTracks()
-  debugLog('Found caption tracks:', tracks.length)
+  // Wait for video to be ready first
+  await waitForVideo()
+
+  // Try to get caption tracks with retries (YouTube data loads asynchronously)
+  let tracks: CaptionTrack[] = []
+  const maxRetries = 4
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    tracks = extractCaptionTracks()
+    debugLog(`Attempt ${attempt + 1}/${maxRetries}: Found caption tracks:`, tracks.length)
+    if (tracks.length > 0) break
+    if (attempt < maxRetries - 1) {
+      const waitTime = attempt < 2 ? 600 : 300
+      await new Promise(resolve => setTimeout(resolve, waitTime))
+    }
+  }
 
   if (tracks.length === 0) {
     return {
@@ -932,38 +882,14 @@ function extractStatsFromDOM(): { views: number | null; likes: number | null; co
  * Check if the current video is an advertisement.
  * YouTube Shorts ads have specific indicators.
  *
- * IMPORTANT: Be very conservative here - only flag actual ads.
+ * IMPORTANT: Be VERY conservative here - only flag actual ads.
  * False positives cause ALL videos to be skipped!
  */
 function isCurrentVideoAd(): YouTubeAdCheckResponse {
   debugLog('Checking if current video is an ad')
 
-  // Helper to check if element is visible and has size
-  const isVisible = (el: Element | null): boolean => {
-    if (!el) return false
-    const style = window.getComputedStyle(el)
-    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
-      return false
-    }
-    // Also check that element has actual size (not zero-size)
-    const rect = el.getBoundingClientRect()
-    if (rect.width === 0 || rect.height === 0) {
-      return false
-    }
-    // Check if any ancestor is hidden
-    let parent = el.parentElement
-    while (parent) {
-      const parentStyle = window.getComputedStyle(parent)
-      if (parentStyle.display === 'none' || parentStyle.visibility === 'hidden') {
-        return false
-      }
-      parent = parent.parentElement
-    }
-    return true
-  }
-
   // Method 1: Check if the video player is in ad-showing state
-  // This is the most reliable indicator - YouTube adds this class only during actual ads
+  // This is THE most reliable indicator - YouTube adds this class ONLY during actual ads
   const player = document.querySelector('#movie_player')
   if (player) {
     const classList = player.className || ''
@@ -971,46 +897,25 @@ function isCurrentVideoAd(): YouTubeAdCheckResponse {
       debugLog('Player in ad state')
       return { isAd: true, reason: 'Player showing ad' }
     }
-
-    // Method 2: Check for ad overlay elements WITHIN the player
-    // Scope to player area to avoid matching sidebar/companion ads
-    const adSelectors = [
-      '.ytp-ad-overlay-container',
-      '.ytp-ad-player-overlay',
-      '.video-ads.ytp-ad-module',
-    ]
-
-    for (const selector of adSelectors) {
-      const element = player.querySelector(selector)
-      if (element && isVisible(element)) {
-        debugLog('Found visible ad overlay in player:', selector)
-        return { isAd: true, reason: 'Ad overlay detected' }
-      }
-    }
   }
 
-  // Method 3: For Shorts, check for ad-specific elements in active reel
+  // Method 2: For Shorts, check for ad-specific elements in active reel
   const activeReel = document.querySelector('ytd-reel-video-renderer[is-active]')
   if (activeReel) {
     // Check for ad slot renderer - this is the definitive indicator for Shorts ads
     const adSlot = activeReel.querySelector('ytd-ad-slot-renderer')
-    if (adSlot && isVisible(adSlot)) {
-      debugLog('Ad slot found in active reel')
-      return { isAd: true, reason: 'Ad slot in reel' }
+    if (adSlot) {
+      // Check if the ad slot actually has content (not just an empty container)
+      const hasAdContent = adSlot.querySelector('ytd-in-feed-ad-layout-renderer, ytd-display-ad-renderer, [class*="ad-container"]')
+      if (hasAdContent) {
+        debugLog('Ad slot with content found in active reel')
+        return { isAd: true, reason: 'Ad slot in reel' }
+      }
     }
 
     // Check for "Sponsored" label specifically in the metadata area
-    // Include common localized variants
     const sponsoredLabels = activeReel.querySelectorAll('[class*="ytd-badge-supported-renderer"]')
-    const sponsoredVariants = [
-      'sponsored', 'ad', 'anzeige', 'gesponsert', // English, German
-      'publicité', 'sponsorisé', 'annonce', // French
-      'sponsorizzato', 'annuncio', // Italian
-      'patrocinado', 'anuncio', // Spanish, Portuguese
-      '広告', 'スポンサー', // Japanese
-      '광고', '스폰서', // Korean
-      '赞助', '广告', // Chinese
-    ]
+    const sponsoredVariants = ['sponsored', 'ad', 'anzeige', 'gesponsert', 'publicité', 'sponsorisé', 'patrocinado']
     for (const label of sponsoredLabels) {
       const text = label.textContent?.trim().toLowerCase() || ''
       if (sponsoredVariants.includes(text)) {
@@ -1019,6 +924,9 @@ function isCurrentVideoAd(): YouTubeAdCheckResponse {
       }
     }
   }
+
+  // REMOVED: The .ytp-ad-overlay-container check was causing false positives
+  // These containers exist on ALL videos but are usually empty/inactive
 
   debugLog('Not an ad')
   return { isAd: false }

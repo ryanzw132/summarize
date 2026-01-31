@@ -542,6 +542,115 @@ function extractStatsFromDOM(): { views: number | null; likes: number | null; co
     }
   }
 
+  // Additional pattern: Find section with like icon and count
+  if (stats.likes === null) {
+    const sections = container.querySelectorAll('section, div')
+    for (const section of sections) {
+      // Look for heart SVG and nearby number
+      const heartSvg = section.querySelector('[aria-label*="Like"], [aria-label*="like"], svg[aria-label*="Heart"], svg[fill="rgb(255, 48, 64)"], svg[fill="#ED4956"]')
+      if (heartSvg) {
+        // Look for number in the same section or nearby
+        const parent = heartSvg.closest('div, section')
+        if (parent) {
+          const spans = parent.querySelectorAll('span')
+          for (const span of spans) {
+            const text = span.textContent?.trim() || ''
+            // Match numbers like "1,234" or "1.2K"
+            const match = text.match(/^([\d,]+(?:\.\d+)?[KMB]?)$/i)
+            if (match) {
+              const count = parseInstagramNumber(match[1])
+              if (count !== null && count >= 0) {
+                stats.likes = count
+                debugLog('Found likes near heart icon:', count)
+                break
+              }
+            }
+          }
+        }
+      }
+      if (stats.likes !== null) break
+    }
+  }
+
+  // Additional pattern: Look for like button with count in aria-label
+  if (stats.likes === null) {
+    const likeButtons = document.querySelectorAll('svg[aria-label*="Like"], button[aria-label*="Like"], span[aria-label*="Like"]')
+    for (const btn of likeButtons) {
+      const ariaLabel = btn.getAttribute('aria-label') || ''
+      // Pattern: "Like" or "Unlike" with count in nearby element
+      const parent = btn.closest('div, section')
+      if (parent) {
+        // Look for sibling spans with numbers
+        const siblingSpans = parent.querySelectorAll('span')
+        for (const span of siblingSpans) {
+          const text = span.textContent?.trim() || ''
+          const match = text.match(/^([\d,]+(?:\.\d+)?[KMB]?)$/i)
+          if (match) {
+            const count = parseInstagramNumber(match[1])
+            // Sanity check - views are usually much higher than likes
+            // If we find a small-ish number near a like button, it's probably likes
+            if (count !== null && count >= 0) {
+              stats.likes = count
+              debugLog('Found likes from button sibling:', count)
+              break
+            }
+          }
+        }
+      }
+      if (stats.likes !== null) break
+    }
+  }
+
+  // Try to find view count from various Instagram patterns
+  if (stats.views === null) {
+    // Pattern: plays count element
+    const playsSections = container.querySelectorAll('span, div')
+    for (const el of playsSections) {
+      const text = el.textContent?.trim() || ''
+      // Match "1.2M plays" or "123K views"
+      const match = text.match(/^([\d,]+(?:\.\d+)?[KMB]?)\s*(?:plays?|views?)$/i)
+      if (match) {
+        stats.views = parseInstagramNumber(match[1])
+        if (stats.views !== null) {
+          debugLog('Found views/plays:', stats.views)
+          break
+        }
+      }
+    }
+  }
+
+  // Look for play icon with count
+  if (stats.views === null) {
+    const playSvgs = container.querySelectorAll('svg')
+    for (const svg of playSvgs) {
+      // Check if this looks like a play button
+      const ariaLabel = svg.getAttribute('aria-label')?.toLowerCase() || ''
+      const hasPlayPath = svg.innerHTML?.includes('polygon') || ariaLabel.includes('play')
+      if (hasPlayPath || ariaLabel.includes('view') || ariaLabel.includes('watch')) {
+        const parent = svg.closest('div, span')
+        if (parent) {
+          const spans = parent.querySelectorAll('span')
+          for (const span of spans) {
+            const text = span.textContent?.trim() || ''
+            const match = text.match(/^([\d,]+(?:\.\d+)?[KMB]?)$/i)
+            if (match) {
+              const count = parseInstagramNumber(match[1])
+              if (count !== null && count > 100) { // Views are usually in hundreds+
+                stats.views = count
+                debugLog('Found views near play icon:', count)
+                break
+              }
+            }
+          }
+        }
+      }
+      if (stats.views !== null) break
+    }
+  }
+
+  // Note: Instagram often doesn't show view count publicly for Reels
+  // (only visible to creators). This is expected behavior.
+
   debugLog('Extracted DOM stats:', stats)
   return stats
 }
@@ -570,7 +679,7 @@ function extractReelCaptionFromDOM(): { caption: string | null; creator: string 
       // Skip "Sponsored" labels
       if (text.toLowerCase() === 'sponsored') continue
       // This might be the caption
-      if (text.length > caption?.length ?? 0) {
+      if (text.length > (caption?.length ?? 0)) {
         caption = text
       }
     }
@@ -608,7 +717,7 @@ function extractReelCaptionFromDOM(): { caption: string | null; creator: string 
         if (text.length < 20) continue
         if (text.match(/^[\d,]+\s*(likes?|views?|comments?)/i)) continue
         if (text.toLowerCase() === 'sponsored') continue
-        if (text.length > caption?.length ?? 0) {
+        if (text.length > (caption?.length ?? 0)) {
           caption = text
         }
       }
@@ -1022,8 +1131,45 @@ async function extractTranscript(): Promise<InstagramTranscriptResponse> {
     }
   }
 
-  const { videoUrl, durationSeconds, title } = extractInstagramVideoInfo()
-  debugLog('Extracted video info:', { hasUrl: !!videoUrl, durationSeconds, title })
+  // Wait for video element to be ready (important for first video after page load)
+  const waitForVideo = async (maxWait = 2500): Promise<HTMLVideoElement | null> => {
+    const startTime = Date.now()
+    while (Date.now() - startTime < maxWait) {
+      const video = document.querySelector('video') as HTMLVideoElement | null
+      if (video && (video.readyState >= 1 || video.src || video.currentSrc)) {
+        debugLog('Video element ready:', { readyState: video.readyState, hasSrc: !!video.src })
+        return video
+      }
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    return document.querySelector('video') as HTMLVideoElement | null
+  }
+
+  // Wait for video to be ready first
+  await waitForVideo()
+
+  // Try to extract video URL with retries (Instagram data loads asynchronously)
+  let videoUrl: string | null = null
+  let durationSeconds: number | null = null
+  let title: string | null = null
+  const maxRetries = 4
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const info = extractInstagramVideoInfo()
+    debugLog(`Attempt ${attempt + 1}/${maxRetries}: Extracted video info:`, { hasUrl: !!info.videoUrl })
+    if (info.videoUrl) {
+      videoUrl = info.videoUrl
+      durationSeconds = info.durationSeconds
+      title = info.title
+      break
+    }
+    if (attempt < maxRetries - 1) {
+      const waitTime = attempt < 2 ? 600 : 300
+      await new Promise(resolve => setTimeout(resolve, waitTime))
+    }
+  }
+
+  debugLog('Final extracted video info:', { hasUrl: !!videoUrl, durationSeconds, title })
 
   if (!videoUrl) {
     // Double-check if it's actually an auth issue we missed

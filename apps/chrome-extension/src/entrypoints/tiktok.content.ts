@@ -136,7 +136,13 @@ function extractTikTokMetadata(): TikTokMetadataResponse {
   try {
     const itemStruct = extractTikTokItemStruct()
     if (!itemStruct) {
-      return emptyResponse
+      // No hydration data - try DOM fallback for stats at least
+      debugLog('No hydration data found, trying DOM fallback for stats')
+      const domStats = extractTikTokStatsFromDOM()
+      return {
+        ...emptyResponse,
+        stats: domStats,
+      }
     }
 
     // Title and description are the same on TikTok (the video caption)
@@ -273,47 +279,124 @@ function extractTikTokStatsFromDOM(): { views: number | null; likes: number | nu
   const stats = { views: null as number | null, likes: null as number | null, comments: null as number | null, shares: null as number | null }
 
   try {
-    // Find the active video container
+    // Find the active video container - try multiple strategies
     const activeVideo = findActiveVideoElement()
-    const videoContainer = activeVideo?.closest('[class*="DivItemContainer"], [class*="DivVideoWrapper"], [data-e2e="recommend-list-item-container"]')
-      || document.querySelector('[class*="DivItemContainer"], [class*="DivVideoWrapper"]')
+
+    // Strategy 1: Find container from active video
+    let videoContainer: Element | Document = activeVideo?.closest('[class*="DivItemContainer"], [class*="DivVideoWrapper"], [data-e2e="recommend-list-item-container"], [class*="DivBrowserMode"]')
       || document
 
-    debugLog('Extracting stats from DOM, container:', videoContainer)
+    // Strategy 2: On video detail page, the whole document is the container
+    const isVideoDetailPage = window.location.pathname.includes('/video/')
+    if (isVideoDetailPage) {
+      videoContainer = document
+    }
+
+    debugLog('Extracting stats from DOM, container:', videoContainer, 'isVideoDetailPage:', isVideoDetailPage)
 
     // TikTok action buttons are typically in a vertical bar on the right
     // Each button has an icon and a count displayed as strong or span text
 
     // Method 1: Look for data-e2e attributes (most reliable)
-    const likeCount = videoContainer.querySelector('[data-e2e="like-count"], [data-e2e="browse-like-count"]')
-    if (likeCount) {
-      stats.likes = parseTikTokNumber(likeCount.textContent || '')
-      debugLog('Found likes from data-e2e:', stats.likes)
+    // TikTok uses different data-e2e values on different page types
+    const likeSelectors = [
+      '[data-e2e="like-count"]',
+      '[data-e2e="browse-like-count"]',
+      '[data-e2e="digg-count"]',
+      '[data-e2e="video-like-count"]',
+    ]
+    for (const selector of likeSelectors) {
+      const likeCount = videoContainer.querySelector(selector)
+      if (likeCount) {
+        stats.likes = parseTikTokNumber(likeCount.textContent || '')
+        if (stats.likes !== null) {
+          debugLog('Found likes from data-e2e:', selector, stats.likes)
+          break
+        }
+      }
     }
 
-    const commentCount = videoContainer.querySelector('[data-e2e="comment-count"], [data-e2e="browse-comment-count"]')
-    if (commentCount) {
-      stats.comments = parseTikTokNumber(commentCount.textContent || '')
-      debugLog('Found comments from data-e2e:', stats.comments)
+    const commentSelectors = [
+      '[data-e2e="comment-count"]',
+      '[data-e2e="browse-comment-count"]',
+      '[data-e2e="video-comment-count"]',
+    ]
+    for (const selector of commentSelectors) {
+      const commentCount = videoContainer.querySelector(selector)
+      if (commentCount) {
+        stats.comments = parseTikTokNumber(commentCount.textContent || '')
+        if (stats.comments !== null) {
+          debugLog('Found comments from data-e2e:', selector, stats.comments)
+          break
+        }
+      }
     }
 
-    const shareCount = videoContainer.querySelector('[data-e2e="share-count"], [data-e2e="undefined-count"]')
-    if (shareCount) {
-      stats.shares = parseTikTokNumber(shareCount.textContent || '')
-      debugLog('Found shares from data-e2e:', stats.shares)
+    const shareSelectors = [
+      '[data-e2e="share-count"]',
+      '[data-e2e="browse-share-count"]',
+      '[data-e2e="video-share-count"]',
+    ]
+    for (const selector of shareSelectors) {
+      const shareCount = videoContainer.querySelector(selector)
+      if (shareCount) {
+        stats.shares = parseTikTokNumber(shareCount.textContent || '')
+        if (stats.shares !== null) {
+          debugLog('Found shares from data-e2e:', selector, stats.shares)
+          break
+        }
+      }
     }
 
     // View count is sometimes in a different location
-    const viewCount = videoContainer.querySelector('[data-e2e="video-views"], [data-e2e="browse-video-views"]')
-    if (viewCount) {
-      stats.views = parseTikTokNumber(viewCount.textContent || '')
-      debugLog('Found views from data-e2e:', stats.views)
+    const viewSelectors = [
+      '[data-e2e="video-views"]',
+      '[data-e2e="browse-video-views"]',
+      '[data-e2e="view-count"]',
+    ]
+    for (const selector of viewSelectors) {
+      const viewCount = videoContainer.querySelector(selector)
+      if (viewCount) {
+        stats.views = parseTikTokNumber(viewCount.textContent || '')
+        if (stats.views !== null) {
+          debugLog('Found views from data-e2e:', selector, stats.views)
+          break
+        }
+      }
     }
 
-    // Method 2: Look for strong elements near action buttons
+    // Method 2: Look for action buttons by aria-label patterns
+    // This is more robust as aria-labels are more stable
+    if (stats.likes === null || stats.comments === null || stats.shares === null) {
+      const buttons = videoContainer.querySelectorAll('button, [role="button"]')
+      for (const btn of buttons) {
+        const ariaLabel = btn.getAttribute('aria-label')?.toLowerCase() || ''
+
+        // Find the count element within or near the button
+        const countEl = btn.querySelector('strong, span')
+        if (!countEl) continue
+        const countText = countEl.textContent?.trim() || ''
+        if (!countText.match(/^[\d.,]+[KMB]?$/i)) continue
+        const count = parseTikTokNumber(countText)
+        if (count === null) continue
+
+        if (stats.likes === null && ariaLabel.includes('like')) {
+          stats.likes = count
+          debugLog('Found likes from aria-label button:', count)
+        } else if (stats.comments === null && ariaLabel.includes('comment')) {
+          stats.comments = count
+          debugLog('Found comments from aria-label button:', count)
+        } else if (stats.shares === null && ariaLabel.includes('share')) {
+          stats.shares = count
+          debugLog('Found shares from aria-label button:', count)
+        }
+      }
+    }
+
+    // Method 3: Look for strong elements near action buttons
     // TikTok often uses <strong> for the count numbers
     if (stats.likes === null || stats.comments === null || stats.shares === null) {
-      const strongElements = videoContainer.querySelectorAll('strong, [class*="StrongText"]')
+      const strongElements = videoContainer.querySelectorAll('strong, [class*="StrongText"], [class*="strong"]')
       for (const strong of strongElements) {
         const text = strong.textContent?.trim() || ''
         // Check if this looks like a count (number or number with K/M suffix)
@@ -331,7 +414,7 @@ function extractTikTokStatsFromDOM(): { views: number | null; likes: number | nu
         const ariaLabel = parent.getAttribute('aria-label')?.toLowerCase() || ''
 
         // Determine stat type from context
-        if (stats.likes === null && (parentClasses.includes('like') || ariaLabel.includes('like') || parentText.includes('like'))) {
+        if (stats.likes === null && (parentClasses.includes('like') || ariaLabel.includes('like') || (parentText.includes('like') && !parentText.includes('unlike')))) {
           stats.likes = count
           debugLog('Found likes from strong:', count)
         } else if (stats.comments === null && (parentClasses.includes('comment') || ariaLabel.includes('comment') || parentText.includes('comment'))) {
@@ -344,9 +427,9 @@ function extractTikTokStatsFromDOM(): { views: number | null; likes: number | nu
       }
     }
 
-    // Method 3: Look for spans with class containing "Count"
+    // Method 4: Look for spans with class containing "Count" or in ActionItem containers
     if (stats.likes === null || stats.comments === null || stats.shares === null) {
-      const countSpans = videoContainer.querySelectorAll('[class*="Count"], [class*="ActionItem"] span')
+      const countSpans = videoContainer.querySelectorAll('[class*="Count"], [class*="ActionItem"] span, [class*="action"] span')
       for (const span of countSpans) {
         const text = span.textContent?.trim() || ''
         if (!text.match(/^[\d.,]+[KMB]?$/i)) continue
@@ -355,16 +438,50 @@ function extractTikTokStatsFromDOM(): { views: number | null; likes: number | nu
         if (count === null) continue
 
         // Check parent for type hint
-        const parent = span.closest('[class*="Like"], [class*="Comment"], [class*="Share"], [class*="ActionItem"]')
+        const parent = span.closest('[class*="Like"], [class*="Comment"], [class*="Share"], [class*="ActionItem"], [class*="like"], [class*="comment"], [class*="share"]')
         if (!parent) continue
 
         const parentClasses = parent.className?.toLowerCase() || ''
-        if (stats.likes === null && parentClasses.includes('like')) {
+        if (stats.likes === null && parentClasses.includes('like') && !parentClasses.includes('unlike')) {
           stats.likes = count
         } else if (stats.comments === null && parentClasses.includes('comment')) {
           stats.comments = count
         } else if (stats.shares === null && parentClasses.includes('share')) {
           stats.shares = count
+        }
+      }
+    }
+
+    // Method 5: Last resort - find any numeric spans in action bar area
+    // TikTok's action bar is typically on the right side of the video
+    if (stats.likes === null || stats.comments === null) {
+      const actionBar = videoContainer.querySelector('[class*="ActionBar"], [class*="action-bar"], [class*="side-bar"]')
+      if (actionBar) {
+        const spans = actionBar.querySelectorAll('span, strong')
+        const numericSpans: { element: Element; count: number }[] = []
+
+        for (const span of spans) {
+          const text = span.textContent?.trim() || ''
+          if (text.match(/^[\d.,]+[KMB]?$/i)) {
+            const count = parseTikTokNumber(text)
+            if (count !== null) {
+              numericSpans.push({ element: span, count })
+            }
+          }
+        }
+
+        // Usually the order is: likes, comments, shares/saves
+        if (numericSpans.length >= 1 && stats.likes === null) {
+          stats.likes = numericSpans[0].count
+          debugLog('Found likes from action bar position:', stats.likes)
+        }
+        if (numericSpans.length >= 2 && stats.comments === null) {
+          stats.comments = numericSpans[1].count
+          debugLog('Found comments from action bar position:', stats.comments)
+        }
+        if (numericSpans.length >= 3 && stats.shares === null) {
+          stats.shares = numericSpans[2].count
+          debugLog('Found shares from action bar position:', stats.shares)
         }
       }
     }
@@ -1118,12 +1235,15 @@ function getCurrentVideoIdentifier(): string | null {
 
 /**
  * Scroll to the next TikTok video in feed.
+ * Returns ok:true if scroll was triggered, ok:false if it failed.
+ * Note: Caller should verify the video actually changed after a delay.
  */
 function scrollToNextVideo(): TikTokScrollNextResponse {
   try {
-    // Remember current video to detect if scroll worked
-    lastSeenVideoId = getCurrentVideoIdentifier()
-    debugLog('Current video before scroll:', lastSeenVideoId)
+    // Remember current video to detect if scroll worked (for debugging)
+    const beforeVideoId = getCurrentVideoIdentifier()
+    lastSeenVideoId = beforeVideoId
+    debugLog('Current video before scroll:', beforeVideoId)
 
     // TikTok uses a vertical swipe to navigate between videos
     // Try multiple methods
@@ -1178,14 +1298,34 @@ async function extractTranscript(): Promise<TikTokTranscriptResponse> {
   debugLog('Starting transcript extraction')
   debugLog('URL:', window.location.href)
 
+  // Wait for video element to be ready (important for first video after page load)
+  const waitForVideo = async (maxWait = 3000): Promise<HTMLVideoElement | null> => {
+    const startTime = Date.now()
+    while (Date.now() - startTime < maxWait) {
+      const video = findActiveVideoElement()
+      // Video should exist and have some data loaded
+      if (video && (video.readyState >= 2 || video.duration > 0 || video.src)) {
+        debugLog('Video element ready:', { readyState: video.readyState, duration: video.duration })
+        return video
+      }
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    return findActiveVideoElement() // Return whatever we have
+  }
+
+  // Wait for video to be ready first
+  const videoEl = await waitForVideo()
+  debugLog('Video element status:', videoEl ? 'found' : 'not found')
+
   // On FYP/explore pages, we might need to retry as data loads dynamically
-  const maxRetries = 3
+  // Increased retries and wait time for first video
+  const maxRetries = 5
   let subtitleInfos: TikTokSubtitleInfo[] = []
   let durationSeconds: number | null = null
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     const videoId = getActiveVideoId()
-    debugLog(`Attempt ${attempt + 1}: Active video ID:`, videoId)
+    debugLog(`Attempt ${attempt + 1}/${maxRetries}: Active video ID:`, videoId)
 
     subtitleInfos = extractTikTokSubtitleInfos()
     durationSeconds = extractTikTokDurationSeconds()
@@ -1197,10 +1337,11 @@ async function extractTranscript(): Promise<TikTokTranscriptResponse> {
       break
     }
 
-    // Wait a bit and retry (data might be loading)
+    // Wait longer on first attempts (hydration data might still be loading)
     if (attempt < maxRetries - 1) {
-      debugLog('No subtitles found, waiting before retry...')
-      await new Promise(resolve => setTimeout(resolve, 500))
+      const waitTime = attempt < 2 ? 800 : 400  // Wait longer on first attempts
+      debugLog(`No subtitles found, waiting ${waitTime}ms before retry...`)
+      await new Promise(resolve => setTimeout(resolve, waitTime))
     }
   }
 

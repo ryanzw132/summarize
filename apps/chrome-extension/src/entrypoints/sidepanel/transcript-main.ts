@@ -25,7 +25,7 @@ type TikTokTranscriptResponse =
       source: 'tiktok-captions'
       durationSeconds: number | null
     }
-  | { ok: false; error: string; reason: 'no_captions' | 'fetch_failed' | 'parse_failed' | 'extraction_error' }
+  | { ok: false; error: string; reason: 'no_captions' | 'fetch_failed' | 'parse_failed' | 'extraction_error' | 'is_ad' | 'is_music' | 'not_english' }
 
 type InstagramTranscriptResponse =
   | {
@@ -35,7 +35,7 @@ type InstagramTranscriptResponse =
       durationSeconds: number | null
       title: string | null
     }
-  | { ok: false; error: string; reason: 'no_video' | 'extraction_failed' | 'unsupported_url' }
+  | { ok: false; error: string; reason: 'no_video' | 'extraction_failed' | 'unsupported_url' | 'is_ad' | 'auth_required' | 'blocked' }
 
 // Metadata response types
 type VideoMetadataResponse = {
@@ -1328,14 +1328,16 @@ type YouTubeTranscriptResponse =
       source: 'youtube-captions'
       durationSeconds: number | null
     }
-  | { ok: false; error: string; reason: 'no_captions' | 'fetch_failed' | 'parse_failed' | 'extraction_error' }
+  | { ok: false; error: string; reason: 'no_captions' | 'fetch_failed' | 'parse_failed' | 'extraction_error' | 'is_ad' | 'is_music' | 'not_english' }
 
-// Return type includes special 'is_ad' flag to signal ad content should be skipped
+// Return type includes special flags for various skip conditions
 type ContentScriptExtractionResult =
   | { text: string; source: string }
   | { videoUrl: string; source: string }
   | { isAd: true; reason: string }
   | { skipSilent: true; reason: string }  // Silent skip - don't count or log (non-English)
+  | { authRequired: true; reason: string }  // Instagram login required
+  | { blocked: true; reason: string }  // Content blocked
   | null
 
 async function tryContentScriptExtraction(
@@ -1433,6 +1435,16 @@ async function tryContentScriptExtraction(
       if (response.reason === 'is_ad') {
         console.log('[Transcript] Instagram content is an ad, skipping:', response.error)
         return { isAd: true, reason: response.error }
+      }
+      // Check for auth/blocked - these are terminal errors, don't fall through to daemon
+      if (response.reason === 'auth_required') {
+        console.log('[Transcript] Instagram requires authentication:', response.error)
+        // Return a special marker that the caller can detect
+        return { authRequired: true, reason: response.error } as unknown as ContentScriptExtractionResult
+      }
+      if (response.reason === 'blocked') {
+        console.log('[Transcript] Instagram content is blocked:', response.error)
+        return { blocked: true, reason: response.error } as unknown as ContentScriptExtractionResult
       }
       console.log('[Transcript] Instagram content script:', response.reason, '-', response.error)
       createDiagnostic('ERR_NO_CAPTIONS', `Instagram: ${response.reason}`, response.error)
@@ -1606,6 +1618,20 @@ async function fetchTranscript() {
       // Check for stale fetch after async operation
       if (isStale()) {
         clearTimeout(safetyTimeoutId)
+        return
+      }
+
+      // Check for terminal errors first (auth required, blocked)
+      if (contentResult && 'authRequired' in contentResult) {
+        clearTimeout(safetyTimeoutId)
+        setProgress(0)
+        showError('Login required to view this Instagram content. Please log in to Instagram and try again.')
+        return
+      }
+      if (contentResult && 'blocked' in contentResult) {
+        clearTimeout(safetyTimeoutId)
+        setProgress(0)
+        showError('This Instagram content is not available. ' + (contentResult.reason || 'It may have been deleted or made private.'))
         return
       }
 
@@ -2044,6 +2070,22 @@ async function startAutoScroll() {
       // Get transcript for current video first to check if we should count it
       const transcriptResult = await getTranscriptForCurrentVideo(tabId, platform, videoCount + 1)
 
+      // Check for terminal errors that should stop auto-scroll
+      if (transcriptResult && 'skip' in transcriptResult) {
+        if (transcriptResult.skip === 'auth_required') {
+          console.log('[AutoScroll] Instagram auth required, stopping:', transcriptResult.reason)
+          autoScrollStatusEl.textContent = 'Stopped: Login required for Instagram'
+          stopAutoScroll()
+          break
+        }
+        if (transcriptResult.skip === 'blocked') {
+          console.log('[AutoScroll] Content blocked, stopping:', transcriptResult.reason)
+          autoScrollStatusEl.textContent = 'Stopped: Content not available'
+          stopAutoScroll()
+          break
+        }
+      }
+
       // Check for silent skip (e.g., non-English) - don't count or log, just move on
       if (transcriptResult && 'skip' in transcriptResult && transcriptResult.skip === 'silent') {
         consecutiveSilentSkips++
@@ -2056,7 +2098,7 @@ async function startAutoScroll() {
         }
 
         // Silently scroll to next without counting or updating UI
-        await scrollToNext(tabId, platform)
+        await scrollToNextVideo(tabId, platform)
         await new Promise(resolve => setTimeout(resolve, scrollDelay))
         continue
       }
@@ -2082,18 +2124,33 @@ async function startAutoScroll() {
         await new Promise(resolve => setTimeout(resolve, 500))
       } else if (transcriptResult && 'text' in transcriptResult && isAutoScrolling) {
         console.log(`[AutoScroll] Got transcript for video ${videoCount}, source: ${transcriptResult.source}`)
-        // Get metadata
-        const metadata = await fetchVideoMetadata(tabId, platform)
 
-        collectedTranscripts.push({
-          platform: platform,
-          transcript: transcriptResult.text,
-          metadata,
-        })
+        // Check for duplicate transcript (scroll might have failed silently)
+        const transcriptText = transcriptResult.text
+        const isDuplicate = collectedTranscripts.some(t =>
+          t.transcript === transcriptText ||
+          (transcriptText.length > 50 && t.transcript.startsWith(transcriptText.slice(0, 50)))
+        )
 
-        updateAutoScrollUI()
-        addTranscriptToList(transcriptResult.text, metadata)
-        autoScrollStatusEl.textContent = `Collected ${collectedTranscripts.length} transcripts`
+        if (isDuplicate) {
+          console.log(`[AutoScroll] Duplicate transcript detected for video ${videoCount}, skipping`)
+          autoScrollStatusEl.textContent = `Video ${videoCount}: duplicate detected, scrolling...`
+          // Don't count this as a new video, scroll didn't work properly
+          videoCount--
+        } else {
+          // Get metadata
+          const metadata = await fetchVideoMetadata(tabId, platform)
+
+          collectedTranscripts.push({
+            platform: platform,
+            transcript: transcriptText,
+            metadata,
+          })
+
+          updateAutoScrollUI()
+          addTranscriptToList(transcriptText, metadata)
+          autoScrollStatusEl.textContent = `Collected ${collectedTranscripts.length} transcripts`
+        }
       } else if (isAutoScrolling) {
         failedCount++
         console.log(`[AutoScroll] Failed to get transcript for video ${videoCount} (total failed: ${failedCount})`)
@@ -2291,6 +2348,8 @@ type TranscriptResult =
   | { skip: 'ad'; reason: string }
   | { skip: 'no_audio'; reason: string }
   | { skip: 'silent'; reason: string }  // Silent skip - don't count or log (e.g., non-English)
+  | { skip: 'auth_required'; reason: string }  // Instagram login required - stop auto-scroll
+  | { skip: 'blocked'; reason: string }  // Content blocked - stop auto-scroll
   | null
 
 /**
@@ -2322,6 +2381,18 @@ async function getTranscriptForCurrentVideo(
   // Use explicit === true check for safety
   if (contentResult && 'skipSilent' in contentResult && contentResult.skipSilent === true) {
     return { skip: 'silent', reason: contentResult.reason }
+  }
+
+  // Check for auth required (Instagram) - terminal error, stop auto-scroll
+  if (contentResult && 'authRequired' in contentResult && contentResult.authRequired === true) {
+    console.log('[AutoScroll] Instagram auth required:', contentResult.reason)
+    return { skip: 'auth_required', reason: contentResult.reason }
+  }
+
+  // Check for blocked content - terminal error, stop auto-scroll
+  if (contentResult && 'blocked' in contentResult && contentResult.blocked === true) {
+    console.log('[AutoScroll] Content blocked:', contentResult.reason)
+    return { skip: 'blocked', reason: contentResult.reason }
   }
 
   // Check if we got valid text (not empty/whitespace)

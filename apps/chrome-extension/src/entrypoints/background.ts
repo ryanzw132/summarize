@@ -2439,6 +2439,9 @@ export default defineBackground(() => {
               }
             }
 
+            // Track if we need Whisper fallback (no native captions found)
+            let needsWhisperFallback = false
+
             // For TikTok, try content script extraction first (has native captions)
             if (isTikTok) {
               console.log('[Transcript Button BG] TikTok detected, trying content script...')
@@ -2462,22 +2465,24 @@ export default defineBackground(() => {
                 return
               }
 
-              // If TikTok has no native captions, fail fast instead of waiting for daemon timeout
-              // The daemon would try yt-dlp which is slow and often blocked by TikTok
+              // If TikTok has no native captions, fall through to daemon for Whisper transcription
+              // (Previously this would "fail fast" but users want Whisper fallback)
               const reason = (response as { reason?: string })?.reason
               if (reason === 'no_captions') {
-                console.log('[Transcript Button BG] TikTok has no captions, failing fast')
-                sendResponse({ ok: false, error: 'No captions available' })
-                return
+                console.log('[Transcript Button BG] TikTok has no captions, falling through to daemon for Whisper...')
+                needsWhisperFallback = true
+              } else {
+                console.log('[Transcript Button BG] TikTok extraction failed, falling through to daemon...')
+                needsWhisperFallback = true  // Any extraction failure should try Whisper
               }
-
-              console.log('[Transcript Button BG] TikTok extraction failed, falling through to daemon...')
-              // Only fall through to daemon for other failures (e.g., page structure changed)
+              // Fall through to daemon for Whisper transcription
             }
 
             // For Instagram, try to get video URL from content script for better daemon handling
+            // Instagram ALWAYS needs Whisper - no native captions
             let extractedVideoUrl: string | null = null
             if (isInstagram) {
+              needsWhisperFallback = true  // Instagram has no native captions, always needs Whisper
               console.log('[Transcript Button BG] Instagram detected, trying content script...')
               const response = await sendMessageWithRetry<{
                 ok?: boolean
@@ -2535,8 +2540,10 @@ export default defineBackground(() => {
                   extractOnly: true,
                   timestamps: false,
                   maxCharacters: null,
-                  // Enable video transcription mode for Instagram CDN URLs
-                  ...(extractedVideoUrl ? { videoMode: 'transcript' } : {}),
+                  // Enable video transcription mode when:
+                  // - Instagram CDN URLs (always need Whisper, no native captions)
+                  // - TikTok with no native captions (Whisper fallback)
+                  ...((extractedVideoUrl || needsWhisperFallback) ? { videoMode: 'transcript' } : {}),
                 }),
                 signal: controller.signal,
               })
